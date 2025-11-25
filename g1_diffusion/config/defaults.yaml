@@ -1,0 +1,15 @@
+dataset:
+  root_dir: "../GMR-master/export_smplx_retargeted"
+  pattern: "*.pkl"
+  min_seq_len: 32
+  window_size: 120
+  stride: 10
+  normalize: true
+  train_split: 0.9  # fraction of sequences for training
+
+state:
+  use_root_pos: true
+  use_root_rot_6d: true
+  use_dof_pos: true
+
+  # later we can add object/keypoints, but not now

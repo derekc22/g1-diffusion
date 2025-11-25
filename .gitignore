@@ -1,1 +1,9 @@
 .vscode/
+data/
+OMOMO_smplx/
+g1_diffusion/samples
+g1_diffusion/plots
+g1_diffusion/runs
+__init__*
+**.cpython**
+mujoco/assets
