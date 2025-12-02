@@ -1,5 +1,5 @@
 dataset:
-  root_dir: "../GMR-master/export_smplx_retargeted"
+  root_dir: "../g1-gmr/export_smplx_retargeted"
   pattern: "*.pkl"
   min_seq_len: 32
   window_size: 120

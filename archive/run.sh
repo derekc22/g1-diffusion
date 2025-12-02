@@ -18,12 +18,12 @@ python trainer_hand_foot_manip_diffusion.py \
     --data_root_folder "./data" \
     --checkpoint="./pretrained_models/stage1/model.pt" \
     --fullbody_checkpoint="./pretrained_models/stage2/model.pt" \
-    --export_smplx_dir "../GMR-master/export_smplx"
+    --export_smplx_dir "../g1-gmr/export_smplx"
 
 
 # 2. Retarget SMPL-X to G1 with GMR
 conda activate gmr
-cd ~/Documents/GMR-master
+cd ~/Documents/g1-gmr
 python3 scripts/smplx_to_robot_dataset.py \
     --src_folder ./export_smplx/ \
     --robot unitree_g1 \
@@ -33,7 +33,7 @@ python3 scripts/smplx_to_robot_dataset.py \
 
 # 3. Visualize retargeted G1 motions with GMR
 conda activate gmr
-cd ~/Documents/GMR-master
+cd ~/Documents/g1-gmr
 python3 scripts/vis_robot_motion_dataset.py \
     --robot unitree_g1 \
     --robot_motion_folder ./export_smplx_retargeted/
@@ -43,14 +43,14 @@ python3 scripts/vis_robot_motion_dataset.py \
 conda activate omomo_env
 cd ~/Documents/ogmp/g1_diffusion
 python scripts/inspect_dataset.py \
-    --root_dir ../../GMR-master/export_smplx_retargeted
+    --root_dir ../../g1-gmr/export_smplx_retargeted
 
 
 # 5. Train the ogmp Stage-1 G1 diffusion model
 conda activate omomo_env
 cd ~/Documents/ogmp/g1_diffusion
 python scripts/train_stage1.py \
-    --root_dir ../../GMR-master/export_smplx_retargeted \
+    --root_dir ../../g1-gmr/export_smplx_retargeted \
     --num_epochs 1 \
     --batch_size 2 \
     --device cuda \
@@ -61,7 +61,7 @@ python scripts/train_stage1.py \
 conda activate omomo_env
 cd ~/Documents/ogmp/g1_diffusion
 python scripts/sample_stage1.py \
-    --root_dir ../../GMR-master/export_smplx_retargeted \
+    --root_dir ../../g1-gmr/export_smplx_retargeted \
     --num_samples 2 \
     --device cuda \
     --backbone transformer
@@ -69,7 +69,7 @@ python scripts/sample_stage1.py \
 
 # 7. Visualize the generated G1 motions with GMR
 conda activate gmr
-cd ~/Documents/GMR-master
+cd ~/Documents/g1-gmr
 python3 scripts/vis_robot_motion_dataset.py \
     --robot unitree_g1 \
     --robot_motion_folder ../ogmp/g1_diffusion/samples/stage1_robot

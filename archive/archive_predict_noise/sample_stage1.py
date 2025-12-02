@@ -27,7 +27,7 @@ def load_latest_checkpoint(save_dir: str) -> str:
 
 def main():
     parser = argparse.ArgumentParser(description="Sample Stage 1 DDPM and export robot motions")
-    parser.add_argument("--root_dir", type=str, default="../../GMR-master/export_smplx_retargeted")
+    parser.add_argument("--root_dir", type=str, default="../../g1-gmr/export_smplx_retargeted")
     parser.add_argument("--save_dir", type=str, default="runs/stage1")
     parser.add_argument("--out_dir", type=str, default="samples/stage1_robot")
     parser.add_argument("--num_samples", type=int, default=2)

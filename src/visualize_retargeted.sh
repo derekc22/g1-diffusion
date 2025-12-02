@@ -5,9 +5,9 @@ set -e  # exit immediately on first error
 source /home/learning/miniconda3/etc/profile.d/conda.sh
 
 conda activate gmr
-cd ~/Documents/GMR-master
+cd ~/Documents/g1-gmr
 python3 scripts/vis_robot_motion_dataset_w_object.py \
     --robot unitree_g1_with_object \
-    --robot_motion_folder /home/learning/Documents/GMR-master/export_smplx_gt_retargeted \
+    --robot_motion_folder /home/learning/Documents/g1-gmr/export_smplx_gt_retargeted \
     --record_video \
     --video_path ../ogmp/videos/render_retargeted.mp4

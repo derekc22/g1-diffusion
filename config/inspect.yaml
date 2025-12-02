@@ -1,4 +1,4 @@
-root_dir: "../GMR-master/export_smplx_gt_retargeted"
+root_dir: "../g1-gmr/export_smplx_gt_retargeted"
 
 dataset:
   window_size: 120

@@ -1,4 +1,4 @@
-root_dir: "/home/learning/Documents/GMR-master/export_smplx_gt_retargeted"
+root_dir: "/home/learning/Documents/g1-gmr/export_smplx_gt_retargeted"
 
 sample:
   model_dir: "/home/learning/Documents/ogmp/logs/e10000000000000000000000000000000000_b256_lr0.0001_ts1000_w120_s10_transformer_2025Dec01_10-10-45"

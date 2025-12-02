@@ -6,7 +6,7 @@ source /home/learning/miniconda3/etc/profile.d/conda.sh
 
 # 2. Retarget SMPL-X to G1 with GMR
 conda activate gmr
-cd ~/Documents/GMR-master
+cd ~/Documents/g1-gmr
 python3 scripts/smplx_to_robot_dataset_rot_6d.py \
     --src_folder ./export_smplx_gt_subset/ \
     --robot unitree_g1 \

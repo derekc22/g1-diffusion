@@ -6,7 +6,7 @@ source /home/learning/miniconda3/etc/profile.d/conda.sh
 
 # 1. Convert OMOMO dataset .p files to SMPL-X with GMR
 conda activate gmr
-cd ~/Documents/GMR-master
+cd ~/Documents/g1-gmr
 python scripts/convert_omomo_to_smplx.py \
-    --target_dir /home/learning/Documents/GMR-master/export_smplx_gt_subset \
+    --target_dir /home/learning/Documents/g1-gmr/export_smplx_gt_subset \
     --num_motions 10

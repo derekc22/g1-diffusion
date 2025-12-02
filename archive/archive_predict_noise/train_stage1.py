@@ -19,7 +19,7 @@ from utils.diffusion import DiffusionConfig, DiffusionSchedule
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train Stage 1 DDPM on G1 states")
-    parser.add_argument("--root_dir", type=str, default="../../GMR-master/export_smplx_retargeted")
+    parser.add_argument("--root_dir", type=str, default="../../g1-gmr/export_smplx_retargeted")
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--window_size", type=int, default=120)
     parser.add_argument("--stride", type=int, default=10)

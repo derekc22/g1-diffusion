@@ -1,4 +1,4 @@
-root_dir: "/home/learning/Documents/GMR-master/export_smplx_gt_retargeted_subset"
+root_dir: "/home/learning/Documents/g1-gmr/export_smplx_gt_retargeted_subset"
 
 train:
   save_dir: "logs"
