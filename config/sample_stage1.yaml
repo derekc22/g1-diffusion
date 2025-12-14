@@ -1,0 +1,22 @@
+root_dir: "/home/learning/Documents/g1-gmr/export_smplx_retargeted"
+
+sample:
+  ckpt_path: "logs/stage1_e100_b3_lr0.0001_ts1000_w120_s10_transformer_2025Dec13_03-45-35/checkpoints/stage1_epoch_000099.pt"  # Path to Stage 1 checkpoint  # Path to Stage 1 checkpoint
+  num_samples: 5
+  timesteps: 1000
+  device: "cuda"
+  random_samples: false
+  seed: 42
+  
+  # Contact constraints
+  apply_constraints: true
+  contact_threshold: 0.03
+  hand_marker_radius: 0.02
+
+dataset:
+  window_size: 120
+  stride: 10
+  min_seq_len: 32
+  train: false
+  train_split: 0.9
+  preload: false

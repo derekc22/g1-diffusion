@@ -1,0 +1,19 @@
+root_dir: "/home/learning/Documents/g1-gmr/export_smplx_gt_retargeted_subset"
+
+train:
+  save_dir: "logs"
+  batch_size: 10
+  timesteps: 10
+  num_epochs: 10000000000000000000000000000000000
+  lr: 1e-4
+  device: "cuda"
+  architecture: "transformer" 
+
+dataset:
+  window_size: 120
+  stride: 10
+  min_seq_len: 32
+  # normalize: True
+  train: True
+  train_split: 0.9
+  preload: False

@@ -1,0 +1,20 @@
+root_dir: "/home/learning/Documents/g1-gmr/export_smplx_gt_retargeted"
+
+sample:
+  model_dir: "/home/learning/Documents/g1-diffusion/logs/e10000000000000000000000000000000000_b256_lr0.0001_ts1000_w120_s10_transformer_2025Dec01_10-10-45"
+  # save_dir: "logs/stage2"
+  num_samples: 20
+  timesteps: 1000
+  device: "cuda"
+  ckpt_path: "/home/learning/Documents/g1-diffusion/logs/e10000000000000000000000000000000000_b256_lr0.0001_ts1000_w120_s10_transformer_2025Dec01_10-10-45/checkpoints/stage2_epoch_1312.pt"
+  random_samples: false
+  seed: 42
+
+dataset:
+  window_size: 120
+  stride: 10
+  min_seq_len: 32
+  # normalize: True
+  train: False
+  train_split: 0.9
+  preload: False
