@@ -2,13 +2,13 @@ root_dir: "/home/learning/Documents/g1-gmr/export_smplx_retargeted"
 
 sample:
   # Checkpoints
-  stage1_ckpt: "/home/learning/Documents/g1-diffusion/logs/stage1_e10000_b5_lr0.0001_ts1000_w120_s10_transformer_2025Dec13_17-18-00/checkpoints/stage1_epoch_003999.pt"  # Path to Stage 1 checkpoint
-  stage2_ckpt: "/home/learning/Documents/g1-diffusion/logs/stage2_e10000_b5_lr0.0001_ts1000_w120_s10_transformer_2025Dec13_17-18-16/checkpoints/stage2_epoch_004499.pt"  # Path to Stage 2 checkpoint
+  stage1_ckpt: "/home/learning/Documents/g1-diffusion/logs/stage1_e10000_b32_lr0.0001_ts1000_w120_s10_transformer_2025Dec14_00-50-43/checkpoints/stage1_epoch_000269.pt"  # Path to Stage 1 checkpoint
+  stage2_ckpt: "/home/learning/Documents/g1-diffusion/logs/stage2_e10000_b32_lr0.0001_ts1000_w120_s10_transformer_2025Dec14_01-23-20/checkpoints/stage2_epoch_000499.pt"  # Path to Stage 2 checkpoint
   
-  num_samples: 5
+  num_samples: 50
   timesteps: 1000
   device: "cuda"
-  random_samples: false
+  random_samples: true
   seed: 42
   
   # Contact constraints (applied between Stage 1 and Stage 2)

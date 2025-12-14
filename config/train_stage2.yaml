@@ -1,10 +1,10 @@
 # Stage 2 Training Configuration (OMOMO-style)
 # Hand Positions → Full-Body Motion
 
-root_dir: "/home/learning/Documents/g1-gmr/export_smplx_retargeted_subset"  # Directory with .pkl files containing hand_positions, root_pos, root_rot, dof_pos
+root_dir: "/media/learning/DATA/export_smplx_retargeted_subset"  # Directory with .pkl files containing hand_positions, root_pos, root_rot, dof_pos
 
 train:
-  batch_size: 5
+  batch_size: 32
   num_epochs: 10000
   lr: 1e-4
   timesteps: 1000  # Diffusion timesteps

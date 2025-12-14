@@ -77,15 +77,18 @@ class OmomoPipeline:
         self.contact_threshold = contact_threshold
         
         # Load Stage 1
-        self.stage1_model, self.stage1_schedule, self.stage1_norm = self._load_stage1(stage1_ckpt)
+        self.stage1_model, self.stage1_schedule, self.stage1_norm, stage1_max_len = self._load_stage1(stage1_ckpt)
         
         # Load Stage 2  
-        self.stage2_model, self.stage2_schedule, self.stage2_norm = self._load_stage2(stage2_ckpt)
+        self.stage2_model, self.stage2_schedule, self.stage2_norm, stage2_max_len = self._load_stage2(stage2_ckpt)
+        
+        # Store max_len (use minimum of both stages for safety)
+        self.max_len = min(stage1_max_len, stage2_max_len)
         
         # Contact processor
         self.contact_processor = ContactConstraintProcessor(contact_threshold=contact_threshold)
     
-    def _load_stage1(self, ckpt_path: str) -> Tuple[torch.nn.Module, DiffusionSchedule, dict]:
+    def _load_stage1(self, ckpt_path: str) -> Tuple[torch.nn.Module, DiffusionSchedule, dict, int]:
         """Load Stage 1 model and schedule."""
         print(f"Loading Stage 1: {ckpt_path}")
         ckpt = torch.load(ckpt_path, map_location=self.device)
@@ -140,9 +143,9 @@ class OmomoPipeline:
             norm["hand_mean"] = norm["hand_mean"].to(self.device)
             norm["hand_std"] = norm["hand_std"].to(self.device)
         
-        return model, schedule, norm
+        return model, schedule, norm, max_len
     
-    def _load_stage2(self, ckpt_path: str) -> Tuple[torch.nn.Module, DiffusionSchedule, dict]:
+    def _load_stage2(self, ckpt_path: str) -> Tuple[torch.nn.Module, DiffusionSchedule, dict, int]:
         """Load Stage 2 model and schedule."""
         print(f"Loading Stage 2: {ckpt_path}")
         ckpt = torch.load(ckpt_path, map_location=self.device)
@@ -202,7 +205,7 @@ class OmomoPipeline:
             norm["state_mean"] = norm["state_mean"].to(self.device)
             norm["state_std"] = norm["state_std"].to(self.device)
         
-        return model, schedule, norm
+        return model, schedule, norm, max_len
     
     @torch.no_grad()
     def _sample_ddpm(
@@ -293,7 +296,23 @@ class OmomoPipeline:
                 - root_pos: (T, 3)
                 - root_rot: (T, 4) quaternion xyzw
                 - dof_pos: (T, Dq)
+                - truncated: bool, True if sequence was truncated
+                - original_len: int, original sequence length before truncation
         """
+        T_original = object_centroid.shape[0]
+        truncated = False
+        
+        # Truncate if sequence exceeds max_len (positional encoding limit)
+        if T_original > self.max_len:
+            print(f"  Warning: Truncating sequence from {T_original} to {self.max_len} frames")
+            bps_encoding = bps_encoding[:self.max_len]
+            object_centroid = object_centroid[:self.max_len]
+            if object_verts is not None:
+                object_verts = object_verts[:self.max_len]
+            if object_rotation is not None:
+                object_rotation = object_rotation[:self.max_len]
+            truncated = True
+        
         T_seq = object_centroid.shape[0]
         
         # Prepare BPS
@@ -380,6 +399,8 @@ class OmomoPipeline:
             "root_pos": root_pos,
             "root_rot": root_rot_quat,
             "dof_pos": dof_pos,
+            "truncated": truncated,
+            "original_len": T_original,
         }
 
 
