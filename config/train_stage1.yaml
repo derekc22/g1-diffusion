@@ -1,0 +1,34 @@
+# Stage 1 Training Configuration
+# Object Geometry → Hand Positions (OMOMO-style)
+
+root_dir: "/media/learning/DATA/export_smplx_retargeted_subset"  # Directory with .pkl files containing hand_positions, bps_encoding, object_centroid
+
+train:
+  batch_size: 32
+  num_epochs: 10000
+  lr: 1e-4
+  timesteps: 1000  # Diffusion timesteps
+  device: "cuda:0"
+  architecture: "transformer"  # or "mlp"
+  save_dir: "./logs"
+  save_every: 10  # Save checkpoint every N epochs
+
+dataset:
+  window_size: 120  # Frames per window (4 seconds at 30fps)
+  stride: 10        # Window stride
+  min_seq_len: 30   # Minimum sequence length
+  train_split: 0.9  # Train/validation split
+  preload: true    # Load data lazily to avoid OOM with large datasets
+
+model:
+  # Object Geometry Encoder (MLP)
+  encoder_hidden: 512
+  encoder_layers: 3
+  object_feature_dim: 256  # Output dimension of geometry encoder (O_t in paper)
+  
+  # Transformer denoiser
+  d_model: 256
+  nhead: 4
+  num_layers: 4  # Paper uses 4 self-attention blocks
+  dim_feedforward: 512
+  dropout: 0.1

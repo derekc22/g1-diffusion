@@ -1,292 +1,400 @@
-import glob
+"""
+Stage 1 Sampling Script: Object Geometry → Hand Positions
+
+Generates hand positions from object motion using the trained Stage 1 model,
+then applies contact constraints for physically plausible results.
+
+Usage:
+    python sample_stage1.py
+"""
+
 import os
-import pickle
 import sys
-from datetime import datetime
-import re
-
-import numpy as np
-import torch
-
+from typing import Optional, Dict, Any
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(CURRENT_DIR)
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from datasets.g1_motion_dataset import G1MotionDataset
-from models.stage1_task_space_diffusion import Stage1MLPModel, Stage1TransformerModel
+import glob
+import pickle
+import numpy as np
+import torch
+from tqdm import tqdm
+import types
+
+from models.stage1_diffusion import Stage1HandDiffusion, Stage1HandDiffusionMLP
 from utils.diffusion import DiffusionConfig, DiffusionSchedule
-from utils.rotation import rot6d_to_quat_xyzw
-from utils.general import load_config, dump_config
+from utils.contact_constraints import (
+    apply_contact_constraints,
+    ContactConstraintProcessor,
+    compute_contact_metrics,
+    compute_hand_jpe,
+)
+from utils.general import load_config
+
+# ---------------------------------------------------------------------------
+# Compatibility shim for pickles created by NumPy >= 2.0
+# ---------------------------------------------------------------------------
+if "numpy._core" not in sys.modules:
+    core_pkg = types.ModuleType("numpy._core")
+    core_pkg.__path__ = []
+    sys.modules["numpy._core"] = core_pkg
+
+if "numpy._core.multiarray" not in sys.modules:
+    sys.modules["numpy._core.multiarray"] = np.core.multiarray
+
+if "numpy._core.numerictypes" not in sys.modules:
+    sys.modules["numpy._core.numerictypes"] = np.core.numerictypes
+
+if "numpy._core.umath" not in sys.modules:
+    sys.modules["numpy._core.umath"] = np.core.umath
+# ---------------------------------------------------------------------------
 
 
-def load_latest_checkpoint(model_dir: str) -> str:
-    ckpts = sorted(glob.glob(os.path.join(model_dir, "checkpoints", "stage1_epoch_*.pt")))
-    if not ckpts:
-        raise RuntimeError(f"No checkpoints found in {model_dir}")
-    return ckpts[-1]
+def load_checkpoint(checkpoint_path: str, device: torch.device):
+    """Load Stage 1 checkpoint and reconstruct model."""
+    print(f"Loading checkpoint: {checkpoint_path}")
+    ckpt = torch.load(checkpoint_path, map_location=device)
+    
+    config = ckpt["config"]
+    arch = config.get("train", {}).get("architecture", "transformer")
+    model_cfg = config.get("model", {})
+    dataset_cfg = config.get("dataset", {})
+    
+    # Get dimensions from config or use defaults
+    bps_dim = model_cfg.get("bps_dim", 3072)
+    centroid_dim = model_cfg.get("centroid_dim", 3)
+    object_feature_dim = model_cfg.get("object_feature_dim", 256)
+    hand_dim = model_cfg.get("hand_dim", 6)
+    
+    # Get max_len from config - this is critical for matching checkpoint
+    window_size = dataset_cfg.get("window_size", 120)
+    max_len = model_cfg.get("max_len", window_size + 100)
+    
+    if arch == "transformer":
+        model = Stage1HandDiffusion(
+            bps_dim=bps_dim,
+            centroid_dim=centroid_dim,
+            object_feature_dim=object_feature_dim,
+            hand_dim=hand_dim,
+            d_model=model_cfg.get("d_model", 256),
+            nhead=model_cfg.get("nhead", 4),
+            num_transformer_layers=model_cfg.get("num_layers", 4),
+            dim_feedforward=model_cfg.get("dim_feedforward", 512),
+            dropout=model_cfg.get("dropout", 0.1),
+            max_len=max_len,
+            encoder_hidden=model_cfg.get("encoder_hidden", 512),
+            encoder_layers=model_cfg.get("encoder_layers", 3),
+        )
+    else:
+        model = Stage1HandDiffusionMLP(
+            bps_dim=bps_dim,
+            centroid_dim=centroid_dim,
+            object_feature_dim=object_feature_dim,
+            hand_dim=hand_dim,
+        )
+    
+    model.load_state_dict(ckpt["model"])
+    model.to(device)
+    model.eval()
+    
+    # Load normalization stats
+    norm_stats = ckpt.get("norm_stats", {})
+    hand_mean = norm_stats.get("hand_mean")
+    hand_std = norm_stats.get("hand_std")
+    
+    if hand_mean is not None:
+        hand_mean = hand_mean.to(device)
+        hand_std = hand_std.to(device)
+    
+    # Create diffusion schedule
+    train_cfg = config.get("train", {})
+    timesteps = train_cfg.get("timesteps", 1000)
+    schedule = DiffusionSchedule(
+        DiffusionConfig(timesteps=timesteps, beta_start=1e-4, beta_end=0.02)
+    ).to(device)
+    
+    return model, schedule, hand_mean, hand_std, config
+
+
+@torch.no_grad()
+def sample_ddpm(
+    model: torch.nn.Module,
+    schedule: DiffusionSchedule,
+    bps_encoding: torch.Tensor,
+    object_centroid: torch.Tensor,
+    num_samples: int = 1,
+) -> torch.Tensor:
+    """
+    Sample hand positions using DDPM reverse process.
+    
+    Args:
+        model: Stage 1 model
+        schedule: Diffusion schedule
+        bps_encoding: (1, T, 3072) or (1, T, 1024, 3)
+        object_centroid: (1, T, 3)
+        num_samples: Number of samples to generate
+    
+    Returns:
+        (num_samples, T, 6) sampled hand positions (normalized)
+    """
+    device = next(model.parameters()).device
+    T_seq = object_centroid.shape[1]
+    
+    # Repeat conditions for multiple samples
+    if num_samples > 1:
+        bps = bps_encoding.repeat(num_samples, 1, 1)
+        centroid = object_centroid.repeat(num_samples, 1, 1)
+    else:
+        bps = bps_encoding
+        centroid = object_centroid
+    
+    # Start from random noise
+    x = torch.randn(num_samples, T_seq, 6, device=device)
+    
+    # Reverse diffusion
+    for n in reversed(range(schedule.timesteps)):
+        t = torch.full((num_samples,), n, device=device, dtype=torch.long)
+        
+        # Predict x0
+        x0_pred = model(x, t, bps, centroid)
+        
+        if n > 0:
+            # Compute mean for x_{n-1}
+            alpha_bar_t = schedule.alpha_bar[n]
+            alpha_bar_t_prev = schedule.alpha_bar[n - 1]
+            alpha_t = schedule.alpha[n]
+            
+            # DDPM sampling
+            mean = (
+                torch.sqrt(alpha_bar_t_prev) * (1 - alpha_t) / (1 - alpha_bar_t) * x0_pred +
+                torch.sqrt(alpha_t) * (1 - alpha_bar_t_prev) / (1 - alpha_bar_t) * x
+            )
+            
+            # Add noise
+            beta_t = schedule.beta[n]
+            sigma = torch.sqrt(beta_t)
+            noise = torch.randn_like(x)
+            x = mean + sigma * noise
+        else:
+            x = x0_pred
+    
+    return x
+
+
+def denormalize_hands(hands: torch.Tensor, mean: torch.Tensor, std: torch.Tensor) -> torch.Tensor:
+    """Denormalize hand positions."""
+    if mean is None:
+        return hands
+    if hands.ndim == 3:  # (B, T, 6)
+        mean = mean.view(1, 1, -1)
+        std = std.view(1, 1, -1)
+    elif hands.ndim == 2:  # (T, 6)
+        mean = mean.view(1, -1)
+        std = std.view(1, -1)
+    return hands * std + mean
+
+
+def process_sequence(
+    model: torch.nn.Module,
+    schedule: DiffusionSchedule,
+    data: Dict[str, Any],
+    hand_mean: Optional[torch.Tensor],
+    hand_std: Optional[torch.Tensor],
+    device: torch.device,
+    apply_constraints: bool = True,
+    contact_threshold: float = 0.03,
+) -> Dict[str, np.ndarray]:
+    """
+    Process a single sequence: sample hands and apply contact constraints.
+    
+    Args:
+        model: Stage 1 model
+        schedule: Diffusion schedule  
+        data: Dict with bps_encoding, object_centroid, object_verts, object_rotation
+        hand_mean, hand_std: Normalization stats
+        device: Torch device
+        apply_constraints: Whether to apply contact constraints
+        contact_threshold: Contact detection threshold
+    
+    Returns:
+        Dict with raw_hands, rectified_hands, contact_metadata
+    """
+    # Prepare inputs
+    bps = torch.from_numpy(data["bps_encoding"]).float().to(device)
+    centroid = torch.from_numpy(data["object_centroid"]).float().to(device)
+    
+    # Handle BPS shape
+    if bps.ndim == 3 and bps.shape[-1] == 3:  # (T, 1024, 3)
+        bps = bps.reshape(bps.shape[0], -1)  # (T, 3072)
+    
+    # Add batch dimension
+    bps = bps.unsqueeze(0)  # (1, T, 3072)
+    centroid = centroid.unsqueeze(0)  # (1, T, 3)
+    
+    # Sample hand positions
+    hands_norm = sample_ddpm(model, schedule, bps, centroid, num_samples=1)  # (1, T, 6)
+    
+    # Denormalize
+    hands_raw = denormalize_hands(hands_norm, hand_mean, hand_std)
+    hands_raw = hands_raw.squeeze(0).cpu().numpy()  # (T, 6)
+    
+    result = {
+        "hands_raw": hands_raw,
+    }
+    
+    # Apply contact constraints if object data available
+    if apply_constraints and "object_verts" in data and "object_rotation" in data:
+        obj_verts = data["object_verts"]
+        obj_rot = data["object_rotation"]
+        
+        processor = ContactConstraintProcessor(contact_threshold=contact_threshold)
+        hands_rect, metadata = processor.process(hands_raw, obj_verts, obj_rot)
+        
+        result["hands_rectified"] = hands_rect
+        result["contact_metadata"] = metadata
+    else:
+        result["hands_rectified"] = hands_raw
+        result["contact_metadata"] = None
+    
+    return result
+
 
 def main():
-
-    yml = load_config("./config/sample.yaml")
+    yml = load_config("./config/sample_stage1.yaml")
     sample_yml = yml["sample"]
     dataset_yml = yml["dataset"]
 
-    root_dir      = yml["root_dir"]
+    root_dir = yml["root_dir"]
+    ckpt_path = sample_yml["ckpt_path"]
+    device = sample_yml["device"]
+    apply_constraints = sample_yml.get("apply_constraints", True)
+    contact_threshold = sample_yml.get("contact_threshold", 0.03)
+    num_samples = sample_yml.get("num_samples", None)
+    evaluate = sample_yml.get("evaluate", False)
+    seed = sample_yml.get("seed", 42)
+    timesteps = sample_yml.get("timesteps", 1000)
 
-    model_dir      = sample_yml["model_dir"]
-    # save_dir       = sample_yml["save_dir"]
-    num_samples   = sample_yml["num_samples"]
-    timesteps     = sample_yml["timesteps"]
-    device        = sample_yml["device"]
-    ckpt_path     = sample_yml["ckpt_path"]   # optional explicit checkpoint path; defaults to latest in model_dir
-    # architecture = sample_yml["architecture"]  # backbone architecture; choose between ["mlp", "transformer"]
-    random_samples         = sample_yml["random_samples"]
-    seed =  sample_yml["seed"]
+    if not ckpt_path:
+        raise ValueError("ckpt_path must be set in config/sample_stage1.yaml")
 
-    window_size     = dataset_yml["window_size"]
-    stride          = dataset_yml["stride"]
-    min_seq_len     = dataset_yml["min_seq_len"]
-    # normalize       = dataset_yml["normalize"]
-    train           = dataset_yml["train"]
-    train_split     = dataset_yml["train_split"]
-    preload         = dataset_yml["preload"]    
-
- 
-
-    ckpt_path = ckpt_path if ckpt_path else load_latest_checkpoint(model_dir)
-    pattern = r"_epoch_(\d+)"
-    match = re.search(pattern, ckpt_path)
-    epoch_num = int(match.group(1))
-
-    save_dir = os.path.join(model_dir, "samples")
-    dtn = datetime.now().strftime("%Y%b%d_%H-%M-%S")
-    EXP_NAME = f"ts{timesteps}_w{window_size}_s{stride}_ckpt{epoch_num}_"
-
-    log_path = os.path.join(save_dir, EXP_NAME + dtn)
-    dump_path = os.path.join(log_path, "config.yml")
-
-    os.makedirs(log_path, exist_ok=True)
-    os.makedirs("./videos", exist_ok=True)
-    dump_config(dump_path, yml)
-
-    device = torch.device(device)
-
-    ckpt = torch.load(ckpt_path, map_location=device)
-    ckpt_config = ckpt.get("config", {}) or {}
-    architecture = ckpt_config.get("train").get("architecture")
-
-    # ckpt_architecture = ckpt_config.get("train").get("architecture")
-    # if ckpt_architecture != architecture:
-    #     print(
-    #         f"Warning: checkpoint architecture '{ckpt_architecture}' differs from requested '{architecture}'. Using checkpoint architecture."
-    #     )
-    # architecture = ckpt_architecture
-
-    norm_stats = ckpt.get("norm_stats")
-    dataset_mean = norm_stats.get("mean")
-    dataset_std = norm_stats.get("std")
-    # print(dataset_mean.device)
-    # print(dataset_std.device)
-    # exit()
+    # Derive output directory from checkpoint path
+    # Expected format: logs/<log_id>/checkpoints/<ckpt_file>
+    # Output to: logs/<log_id>/samples/<timestamp>/
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y%b%d_%H-%M-%S")
     
-    dataset = G1MotionDataset(
-        root_dir=root_dir,
-        window_size=window_size,
-        stride=stride,
-        min_seq_len=min_seq_len,
-        # normalize=normalize,
-        train=train,
-        train_split=train_split,
-        preload=preload,
-        mean=dataset_mean.cpu(),
-        std=dataset_std.cpu(),
-    )
-    sample0 = dataset[0]
-    T, state_dim = sample0["state"].shape
-    dataset_cond_dim = sample0["cond"].shape[-1]
-    # dataset_mean = dataset.mean.to(device)  # (D,)
-    # dataset_std = dataset.std.to(device)    # (D,)
+    # Extract log_id from checkpoint path
+    ckpt_parts = ckpt_path.split("/")
+    if "logs" in ckpt_parts and "checkpoints" in ckpt_parts:
+        logs_idx = ckpt_parts.index("logs")
+        log_id = ckpt_parts[logs_idx + 1]
+        
+        # Create sample folder name with config info
+        window_size = dataset_yml.get("window_size", 120)
+        stride = dataset_yml.get("stride", 10)
+        sample_folder = f"ts{timesteps}_w{window_size}_s{stride}_{timestamp}"
+        
+        output_dir = os.path.join("logs", log_id, "samples", sample_folder)
+    # else:
+    #     # Fallback to config output_dir if checkpoint path doesn't match expected pattern
+    #     output_dir = sample_yml.get("output_dir", "./out/stage1")
 
-    # # load a reference robot motion file to get local_body_pos and link_body_list
-    # ref_files = sorted(glob.glob(os.path.join(root_dir, "*.pkl")))
-    # if not ref_files:
-    #     raise RuntimeError(f"No reference motion files found in {root_dir}")
-    # with open(ref_files[0], "rb") as f:
-    #     ref_motion = pickle.load(f)
+    os.makedirs(output_dir, exist_ok=True)
+    device = torch.device(device)
+    torch.manual_seed(seed)
 
-    # ref_local_body_pos = ref_motion.get("local_body_pos", None)
-    # ref_link_body_list = ref_motion.get("link_body_list", None)
+    # Save config to samples directory for reproducibility
+    import yaml
+    config_path = os.path.join(output_dir, "config.yml")
+    with open(config_path, "w") as f:
+        yaml.dump(yml, f, default_flow_style=False)
 
-    diff_config = DiffusionConfig(timesteps=timesteps, beta_start=1e-4, beta_end=0.02)
-    schedule = DiffusionSchedule(diff_config).to(device)
+    # Load model
+    model, schedule, hand_mean, hand_std, config = load_checkpoint(ckpt_path, device)
 
-    def infer_cond_dim(model_state: dict, state_dim_val: int) -> int:
-        if "state_proj.weight" in model_state:
-            weight = model_state["state_proj.weight"]
-        elif "mlp.0.weight" in model_state:
-            weight = model_state["mlp.0.weight"]
-        else:
-            return 0
-        input_dim = weight.shape[1]
-        cond_dim_est = int(input_dim - state_dim_val)
-        # if cond_dim_est < 0:
-        #     raise RuntimeError(
-        #         f"Checkpoint input dim ({input_dim}) smaller than state_dim ({state_dim_val})."
-        #     )
-        return cond_dim_est
+    # Find input files
+    files = sorted(glob.glob(os.path.join(root_dir, "*.pkl")))
+    if num_samples:
+        files = files[:num_samples]
 
-    model_cond_dim = infer_cond_dim(ckpt["model"], state_dim)
-    # if model_cond_dim > dataset_cond_dim:
-    #     raise RuntimeError(
-    #         f"Checkpoint expects cond_dim={model_cond_dim} but dataset only provides {dataset_cond_dim}."
-    #     )
-    # if 0 < model_cond_dim < dataset_cond_dim:
-    #     print(
-    #         f"Info: checkpoint cond_dim={model_cond_dim}, dataset cond_dim={dataset_cond_dim}. Using the first {model_cond_dim} conditioning features."
-    #     )
+    print(f"Processing {len(files)} files")
+    print(f"Output directory: {output_dir}")
 
-    if architecture == "mlp":
-        model = Stage1MLPModel(state_dim=state_dim, cond_dim=model_cond_dim).to(device)
-    else:
-        model = Stage1TransformerModel(state_dim=state_dim, cond_dim=model_cond_dim).to(device)
+    # Metrics accumulators
+    all_metrics = []
+    all_hand_jpe = []
 
-    model.load_state_dict(ckpt["model"])
-    model.eval()
+    for fpath in tqdm(files, desc="Processing"):
+        fname = os.path.basename(fpath)
 
-    B = num_samples
+        with open(fpath, "rb") as f:
+            data = pickle.load(f)
 
-    rng = np.random.default_rng() if random_samples else np.random.default_rng(seed=seed)
-    indices = rng.integers(0, len(dataset), size=B)
-    # indices = np.random.randint(0, len(dataset), size=B)
-    cond_tensors = []
-    window_meta = []
+        # Check required keys
+        if "bps_encoding" not in data or "object_centroid" not in data:
+            print(f"  Skipping {fname}: missing object data")
+            continue
 
-    for idx in indices:
-        sample_i = dataset[int(idx)]
-        cond_tensor_full = sample_i["cond"]  # (T, dataset_cond_dim)
-        # if cond_tensor_full.shape[0] != T:
-        #     raise ValueError(
-        #         f"Conditioning window length {cond_tensor_full.shape[0]} does not match state length {T}"
-        #     )
-
-        if model_cond_dim > 0:
-            # if cond_tensor_full.shape[1] < model_cond_dim:
-            #     raise ValueError(
-            #         f"Conditioning dim {cond_tensor_full.shape[1]} smaller than model requirement {model_cond_dim}"
-            #     )
-            cond_tensors.append(cond_tensor_full[:, :model_cond_dim])
-
-        cond_np = cond_tensor_full.cpu().numpy().astype(np.float32)
-        window_meta.append(
-            {
-                "fps": float(sample_i["fps"]),
-                "seq_name": sample_i.get("seq_name", f"window_{idx}"),
-                "file_idx": int(sample_i["file_idx"]),
-                "start": int(sample_i["start"]),
-                "object_pos": cond_np[:, :3],
-                "object_rot_6d": cond_np[:, 3:9],
-            }
+        # Process
+        result = process_sequence(
+            model, schedule, data,
+            hand_mean, hand_std, device,
+            apply_constraints=apply_constraints,
+            contact_threshold=contact_threshold,
         )
 
-    cond_batch = None
-    if model_cond_dim > 0:
-        cond_batch = torch.stack(cond_tensors, dim=0).to(device)
+        # Evaluate against GT if available
+        if evaluate and "hand_positions" in data:
+            gt_hands = data["hand_positions"]
+            pred_hands = result["hands_rectified"]
 
-    x_t = torch.randn(B, T, state_dim, device=device)
-    cond_model_input = cond_batch if model_cond_dim > 0 else None
+            # Hand JPE
+            jpe = compute_hand_jpe(pred_hands, gt_hands)
+            all_hand_jpe.append(jpe)
 
-    for t_idx in reversed(range(timesteps)):
-        t = torch.full((B,), t_idx, device=device, dtype=torch.long)
-        with torch.no_grad():
-            # Model now directly predicts x0 in normalized space
-            x0_pred = model(x_t, t, cond=cond_model_input)
+            # Contact metrics (if object verts available)
+            if "object_verts" in data:
+                metrics = compute_contact_metrics(
+                    pred_hands, gt_hands, data["object_verts"],
+                    contact_threshold=0.05,
+                )
+                all_metrics.append(metrics)
 
-        beta_t = schedule.beta[t_idx]
-        alpha_t = schedule.alpha[t_idx]
-        alpha_bar_t = schedule.alpha_bar[t_idx]
-        alpha_bar_prev = schedule.alpha_bar[t_idx - 1] if t_idx > 0 else torch.tensor(1.0, device=device)
-
-        if t_idx > 0:
-            coef1 = torch.sqrt(alpha_bar_prev) * beta_t / (1.0 - alpha_bar_t)
-            coef2 = torch.sqrt(alpha_t) * (1.0 - alpha_bar_prev) / (1.0 - alpha_bar_t)
-            posterior_mean = coef1.unsqueeze(0).unsqueeze(0) * x0_pred + coef2.unsqueeze(0).unsqueeze(0) * x_t
-            var = beta_t * (1.0 - alpha_bar_prev) / (1.0 - alpha_bar_t)
-            noise = torch.randn_like(x_t)
-            x_t = posterior_mean + torch.sqrt(var).unsqueeze(0).unsqueeze(0) * noise
-        else:
-            x_t = x0_pred
-
-    x0_norm = x_t  # (B, T, D)
-
-    # print(dataset_mean.shape)
-    # print(x0_norm.shape)
-    mean_batched = dataset_mean.view(1, 1, -1)
-    # print(mean_batched.shape)
-    std_batched = dataset_std.view(1, 1, -1)
-    # exit()
-    x0 = x0_norm * std_batched + mean_batched
-
-    x0_np = x0.detach().cpu().numpy()
-
-    for i in range(B):
-        state_i = x0_np[i]
-        meta_i = window_meta[i]
-
-        root_pos = state_i[:, 0:3]
-        root_rot6d = state_i[:, 3:9]
-        dof_pos = state_i[:, 9:]
-        root_rot6d_t = torch.from_numpy(root_rot6d).float().to(device)
-        root_quat_xyzw = rot6d_to_quat_xyzw(root_rot6d_t).cpu().numpy()
-
-        obj_pos = meta_i["object_pos"]
-        obj_rot6d = meta_i["object_rot_6d"]
-        obj_rot6d_t = torch.from_numpy(obj_rot6d).float().to(device)
-        obj_quat_xyzw = rot6d_to_quat_xyzw(obj_rot6d_t).cpu().numpy()
-
-        fps_i = float(meta_i["fps"])
-
-        motion_data = {
-            "fps": fps_i,
-            "root_pos": root_pos.astype(np.float32),
-            "root_rot": root_quat_xyzw.astype(np.float32),
-            "dof_pos": dof_pos.astype(np.float32),
-            "object_pos": obj_pos.astype(np.float32),
-            "object_rot": obj_quat_xyzw.astype(np.float32),
-            "source_seq_name": meta_i["seq_name"],
-            "source_file_idx": meta_i["file_idx"],
-            "source_start": meta_i["start"],
-            "local_body_pos": np.zeros((T, 0, 3), dtype=np.float32),
-            "link_body_list": []
+        # Save result
+        output_data = {
+            "seq_name": data.get("seq_name", fname),
+            "hands_raw": result["hands_raw"],
+            "hands_rectified": result["hands_rectified"],
+            "contact_metadata": result["contact_metadata"],
         }
 
-        # if ref_local_body_pos is not None:
-        #     ref_lbp = np.asarray(ref_local_body_pos, dtype=np.float32)
-        #     T_ref = ref_lbp.shape[0]
-        #     if T_ref >= T:
-        #         local_body_pos = ref_lbp[:T]
-        #     else:
-        #         pad_len = T - T_ref
-        #         last = ref_lbp[-1:, :, :]
-        #         pad = np.repeat(last, pad_len, axis=0)
-        #         local_body_pos = np.concatenate([ref_lbp, pad], axis=0)
-        #     motion_data["local_body_pos"] = local_body_pos.astype(np.float32)
-        # else:
-            # motion_data["local_body_pos"] = np.zeros((T, 0, 3), dtype=np.float32)
+        # Optionally include GT for comparison
+        if "hand_positions" in data:
+            output_data["hands_gt"] = data["hand_positions"]
 
-        # if ref_link_body_list is not None:
-        #     motion_data["link_body_list"] = ref_link_body_list
-        # else:
-        #     motion_data["link_body_list"] = []
-
-        seq_for_name = meta_i.get("seq_name") or f"stage1_seq_{i:03d}"
-        safe_base = seq_for_name.replace("/", "_")
-        out_name = f"{safe_base}_sample_{i:03d}.pkl"
-        out_path = os.path.join(log_path, out_name)
+        out_path = os.path.join(output_dir, fname)
         with open(out_path, "wb") as f:
-            pickle.dump(motion_data, f)
-        print(f"Saved sample to {out_path}")
+            pickle.dump(output_data, f)
+
+    # Print evaluation summary
+    if evaluate and all_hand_jpe:
+        print("\n" + "=" * 50)
+        print("Evaluation Results:")
+        print(f"  Hand JPE (cm): {np.mean(all_hand_jpe):.2f} ± {np.std(all_hand_jpe):.2f}")
+
+        if all_metrics:
+            avg_prec = np.mean([m["precision"] for m in all_metrics])
+            avg_rec = np.mean([m["recall"] for m in all_metrics])
+            avg_f1 = np.mean([m["f1"] for m in all_metrics])
+            print(f"  Contact Precision: {avg_prec:.3f}")
+            print(f"  Contact Recall: {avg_rec:.3f}")
+            print(f"  Contact F1: {avg_f1:.3f}")
+        print("=" * 50)
+
+    print(f"\nResults saved to {output_dir}")
 
 
 if __name__ == "__main__":

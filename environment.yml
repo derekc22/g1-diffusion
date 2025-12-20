@@ -1,4 +1,4 @@
-name: ogmp
+name: g1-diffusion
 channels:
   - defaults
   - conda-forge
@@ -167,4 +167,4 @@ dependencies:
       - trimesh==4.9.0
       - wandb==0.12.21
       - zipp==3.20.2
-prefix: /home/learning/miniconda3/envs/ogmp
+prefix: /home/learning/miniconda3/envs/g1-diffusion
