@@ -536,7 +536,7 @@ def main():
         # This format is required for plot_robot_motion_compare_w_object.py
         # which uses regex to match model outputs to ground truth files
         fname_base = os.path.splitext(fname)[0]
-        out_fname = f"{fname_base}_sample_000.pkl"
+        out_fname = f"{fname_base}.pkl"
         out_path = os.path.join(output_dir, out_fname)
         with open(out_path, "wb") as f:
             pickle.dump(output_data, f)

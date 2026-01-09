@@ -1,11 +1,11 @@
-root_dir: "/home/learning/Documents/g1-gmr/export_smplx_retargeted"
+root_dir: "/media/learning/DATA/export_smplx_retargeted_clothesstand"
 
 sample:
   # Checkpoints
-  stage1_ckpt: "/home/learning/Documents/g1-diffusion/logs/stage1_e10000_b32_lr0.0001_ts1000_w120_s10_transformer_2025Dec14_00-50-43/checkpoints/stage1_epoch_000269.pt"  # Path to Stage 1 checkpoint
-  stage2_ckpt: "/home/learning/Documents/g1-diffusion/logs/stage2_e10000_b32_lr0.0001_ts1000_w120_s10_transformer_2025Dec14_01-23-20/checkpoints/stage2_epoch_000499.pt"  # Path to Stage 2 checkpoint
+  stage1_ckpt: "/home/learning/Documents/g1-diffusion/logs/stage1_e10000_b5_lr0.0001_ts1000_w120_s10_transformer_2025Dec22_05-35-08/checkpoints/stage1_epoch_002889.pt"
+  stage2_ckpt: "/home/learning/Documents/g1-diffusion/logs/stage2_e10000_b5_lr0.0001_ts1000_w120_s10_transformer_2025Dec22_05-34-21/checkpoints/stage2_epoch_004699.pt"  # Path to Stage 2 checkpoint
   
-  num_samples: 50
+  num_samples: 10
   timesteps: 1000
   device: "cuda"
   random_samples: true
