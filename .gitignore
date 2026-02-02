@@ -12,3 +12,4 @@ logs/
 videos/
 **__pycache__
 history/
+retargeted_samples/

@@ -1,0 +1,63 @@
+# Stage 1 Optimized Sampling Configuration
+# Object Geometry → Hand Positions with inference time optimizations
+
+# Inherit base paths from sample_stage1.yaml or override here
+root_dir: "/path/to/processed/data"
+
+sample:
+  ckpt_path: ""  # Path to Stage 1 checkpoint
+  device: "cuda"
+  seed: 42
+  num_samples: null  # null = process all files
+  
+  # Contact constraints
+  apply_constraints: true
+  contact_threshold: 0.03
+  
+  # Partial motion generation (optional)
+  # If set, generates motion of this length (in frames) instead of full object motion length
+  # Set to null or omit to use full object motion length
+  partial_motion_length: 120
+  
+  # Evaluation
+  evaluate: false
+
+# Inference optimization settings
+# See config/examples/ folder for preset configurations you can copy-paste
+optimization:
+  # Precision: "fp32", "fp16", "bf16"
+  # - fp16: ~2x speedup on CUDA, good for most cases
+  # - bf16: Better stability on Ampere+ GPUs (RTX 30xx, A100)
+  precision: "fp16"
+  
+  # Sampler: "ddpm", "ddim", "dpm_solver"
+  # - ddpm: Original, highest quality, slowest (1000 steps)
+  # - ddim: Fast, good quality (50-100 steps recommended)
+  # - dpm_solver: Fastest, good for real-time (20 steps)
+  sampler: "ddim"
+  
+  # Number of inference steps (ignored for ddpm)
+  # - ddim: 50-100 recommended
+  # - dpm_solver: 20-25 recommended
+  num_inference_steps: 50
+  
+  # DDIM eta: 0.0 = deterministic, 1.0 = full stochasticity
+  ddim_eta: 0.0
+  
+  # torch.compile settings (PyTorch 2.0+)
+  use_torch_compile: false
+  compile_mode: "reduce-overhead"  # "default", "reduce-overhead", "max-autotune"
+  compile_fullgraph: false  # Set true for better optimization, may fail on dynamic shapes
+  
+  # Warmup iterations before inference
+  warmup_iterations: 3
+
+# Experiment name (optional): appended to sample folder name
+# Leave empty for no suffix
+# Example: exp_name: "optimized_fast" → folder ends with "_optimized_fast"
+exp_name: ""
+
+# Dataset settings (inherited or override)
+dataset:
+  window_size: 120
+  stride: 10

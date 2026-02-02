@@ -8,6 +8,6 @@ conda activate g1-gmr
 cd ~/Documents/g1-gmr
 python3 scripts/plot_robot_motion_dataset_w_object.py \
     --robot unitree_g1_with_object \
-    --robot_motion_folder /home/learning/Documents/g1-gmr/export_smplx_retargeted \
+    --robot_motion_folder /home/learning/Documents/g1-diffusion/retargeted_samples/sub1_clothesstand \
     --save_dir /home/learning/Documents/g1-diffusion/figures/retargeted \
-    --num_motions 5
+    # --num_motions 5

@@ -5,11 +5,12 @@ Generates hand positions from object motion using the trained Stage 1 model,
 then applies contact constraints for physically plausible results.
 
 Usage:
-    python sample_stage1.py
+    python sample_stage1.py --config_path ./config/sample_stage1.yaml
 """
 
 import os
 import sys
+import argparse
 from typing import Optional, Dict, Any
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -19,6 +20,7 @@ if PROJECT_ROOT not in sys.path:
 
 import glob
 import pickle
+import time
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -206,6 +208,7 @@ def process_sequence(
     device: torch.device,
     apply_constraints: bool = True,
     contact_threshold: float = 0.03,
+    partial_motion_length: Optional[int] = None,
 ) -> Dict[str, np.ndarray]:
     """
     Process a single sequence: sample hands and apply contact constraints.
@@ -218,13 +221,36 @@ def process_sequence(
         device: Torch device
         apply_constraints: Whether to apply contact constraints
         contact_threshold: Contact detection threshold
+        partial_motion_length: If set, generate motion of this length instead of full object motion length
     
     Returns:
-        Dict with raw_hands, rectified_hands, contact_metadata
+        Dict with raw_hands, rectified_hands, contact_metadata, partial, target_len, original_len
     """
+    # Get original length
+    T_original = data["object_centroid"].shape[0]
+    partial = False
+    target_len = None
+    
+    # Handle partial motion generation
+    bps_enc = data["bps_encoding"]
+    centroid = data["object_centroid"]
+    obj_verts = data.get("object_verts")
+    obj_rot = data.get("object_rotation")
+    
+    if partial_motion_length is not None and partial_motion_length > 0:
+        if partial_motion_length < T_original:
+            bps_enc = bps_enc[:partial_motion_length]
+            centroid = centroid[:partial_motion_length]
+            if obj_verts is not None:
+                obj_verts = obj_verts[:partial_motion_length]
+            if obj_rot is not None:
+                obj_rot = obj_rot[:partial_motion_length]
+            partial = True
+            target_len = partial_motion_length
+    
     # Prepare inputs
-    bps = torch.from_numpy(data["bps_encoding"]).float().to(device)
-    centroid = torch.from_numpy(data["object_centroid"]).float().to(device)
+    bps = torch.from_numpy(bps_enc).float().to(device)
+    centroid_t = torch.from_numpy(centroid).float().to(device)
     
     # Handle BPS shape
     if bps.ndim == 3 and bps.shape[-1] == 3:  # (T, 1024, 3)
@@ -232,10 +258,10 @@ def process_sequence(
     
     # Add batch dimension
     bps = bps.unsqueeze(0)  # (1, T, 3072)
-    centroid = centroid.unsqueeze(0)  # (1, T, 3)
+    centroid_t = centroid_t.unsqueeze(0)  # (1, T, 3)
     
     # Sample hand positions
-    hands_norm = sample_ddpm(model, schedule, bps, centroid, num_samples=1)  # (1, T, 6)
+    hands_norm = sample_ddpm(model, schedule, bps, centroid_t, num_samples=1)  # (1, T, 6)
     
     # Denormalize
     hands_raw = denormalize_hands(hands_norm, hand_mean, hand_std)
@@ -243,13 +269,13 @@ def process_sequence(
     
     result = {
         "hands_raw": hands_raw,
+        "partial": partial,
+        "target_len": target_len,
+        "original_len": T_original,
     }
     
     # Apply contact constraints if object data available
-    if apply_constraints and "object_verts" in data and "object_rotation" in data:
-        obj_verts = data["object_verts"]
-        obj_rot = data["object_rotation"]
-        
+    if apply_constraints and obj_verts is not None and obj_rot is not None:
         processor = ContactConstraintProcessor(contact_threshold=contact_threshold)
         hands_rect, metadata = processor.process(hands_raw, obj_verts, obj_rot)
         
@@ -263,7 +289,12 @@ def process_sequence(
 
 
 def main():
-    yml = load_config("./config/sample_stage1.yaml")
+    parser = argparse.ArgumentParser(description="Stage 1 Sampling")
+    parser.add_argument("--config_path", type=str, default="./config/sample_stage1.yaml",
+                        help="Path to YAML config file")
+    args = parser.parse_args()
+    
+    yml = load_config(args.config_path)
     sample_yml = yml["sample"]
     dataset_yml = yml["dataset"]
 
@@ -276,6 +307,7 @@ def main():
     evaluate = sample_yml.get("evaluate", False)
     seed = sample_yml.get("seed", 42)
     timesteps = sample_yml.get("timesteps", 1000)
+    partial_motion_length = sample_yml.get("partial_motion_length", None)
 
     if not ckpt_path:
         raise ValueError("ckpt_path must be set in config/sample_stage1.yaml")
@@ -286,6 +318,10 @@ def main():
     from datetime import datetime
     timestamp = datetime.now().strftime("%Y%b%d_%H-%M-%S")
     
+    # Get optional experiment name for folder suffix
+    exp_name = yml.get("exp_name", "")
+    suffix = f"_{exp_name}" if exp_name else ""
+    
     # Extract log_id from checkpoint path
     ckpt_parts = ckpt_path.split("/")
     if "logs" in ckpt_parts and "checkpoints" in ckpt_parts:
@@ -295,7 +331,7 @@ def main():
         # Create sample folder name with config info
         window_size = dataset_yml.get("window_size", 120)
         stride = dataset_yml.get("stride", 10)
-        sample_folder = f"ts{timesteps}_w{window_size}_s{stride}_{timestamp}"
+        sample_folder = f"ts{timesteps}_w{window_size}_s{stride}_{timestamp}{suffix}"
         
         output_dir = os.path.join("logs", log_id, "samples", sample_folder)
     # else:
@@ -326,6 +362,10 @@ def main():
     # Metrics accumulators
     all_metrics = []
     all_hand_jpe = []
+    
+    # Performance tracking
+    total_time = 0.0
+    sample_durations = []
 
     for fpath in tqdm(files, desc="Processing"):
         fname = os.path.basename(fpath)
@@ -338,13 +378,25 @@ def main():
             print(f"  Skipping {fname}: missing object data")
             continue
 
+        start_time = time.perf_counter()
+        
         # Process
         result = process_sequence(
             model, schedule, data,
             hand_mean, hand_std, device,
             apply_constraints=apply_constraints,
             contact_threshold=contact_threshold,
+            partial_motion_length=partial_motion_length,
         )
+        
+        elapsed = time.perf_counter() - start_time
+        total_time += elapsed
+        
+        # Track sample duration (motion length in seconds)
+        fps = data.get("fps", 30.0)
+        # Use actual generated length instead of original object motion length
+        num_frames = result["hands_raw"].shape[0]
+        sample_durations.append(num_frames / fps)
 
         # Evaluate against GT if available
         if evaluate and "hand_positions" in data:
@@ -393,6 +445,53 @@ def main():
             print(f"  Contact Recall: {avg_rec:.3f}")
             print(f"  Contact F1: {avg_f1:.3f}")
         print("=" * 50)
+
+    # Print and save performance summary
+    print("\n" + "=" * 50)
+    print("Performance Summary:")
+    print(f"  Total files: {len(files)}")
+    print(f"  Total time: {total_time:.2f}s")
+    if files:
+        print(f"  Average time: {total_time / len(files) * 1000:.2f}ms per sample")
+        print(f"  Throughput: {len(files) / total_time:.2f} samples/sec")
+    if sample_durations:
+        print(f"  Average sample duration: {np.mean(sample_durations):.2f}s")
+    print("=" * 50)
+    
+    # Build and save summary text
+    summary_lines = [
+        "Performance Summary",
+        "=" * 50,
+        f"Total files: {len(files)}",
+        f"Total time: {total_time:.2f}s",
+    ]
+    if files:
+        summary_lines.extend([
+            f"Average time: {total_time / len(files) * 1000:.2f}ms per sample",
+            f"Throughput: {len(files) / total_time:.2f} samples/sec",
+        ])
+    if sample_durations:
+        summary_lines.append(f"Average sample duration: {np.mean(sample_durations):.2f}s")
+    
+    if evaluate and all_hand_jpe:
+        summary_lines.extend([
+            "",
+            "Evaluation Results",
+            f"Hand JPE (cm): {np.mean(all_hand_jpe):.2f} ± {np.std(all_hand_jpe):.2f}",
+        ])
+        if all_metrics:
+            avg_prec = np.mean([m["precision"] for m in all_metrics])
+            avg_rec = np.mean([m["recall"] for m in all_metrics])
+            avg_f1 = np.mean([m["f1"] for m in all_metrics])
+            summary_lines.extend([
+                f"Contact Precision: {avg_prec:.3f}",
+                f"Contact Recall: {avg_rec:.3f}",
+                f"Contact F1: {avg_f1:.3f}",
+            ])
+    
+    summary_path = os.path.join(output_dir, "performance_summary.txt")
+    with open(summary_path, "w") as f:
+        f.write("\n".join(summary_lines))
 
     print(f"\nResults saved to {output_dir}")
 

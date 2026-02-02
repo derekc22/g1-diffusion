@@ -11,7 +11,11 @@ sample:
   # Contact constraints
   apply_constraints: true
   contact_threshold: 0.03
-  hand_marker_radius: 0.02
+  
+  # Partial motion generation (optional)
+  # If set, generates motion of this length (in frames) instead of full object motion length
+  # Set to null or omit to use full object motion length
+  partial_motion_length: 120
 
 dataset:
   window_size: 120

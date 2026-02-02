@@ -97,7 +97,8 @@ class ObjectGeometryEncoder(nn.Module):
 def timestep_embedding(
     timesteps: torch.Tensor,
     dim: int,
-    max_period: float = 10000.0
+    max_period: float = 10000.0,
+    dtype: torch.dtype = None,
 ) -> torch.Tensor:
     """
     Sinusoidal timestep embedding for diffusion models.
@@ -106,6 +107,7 @@ def timestep_embedding(
         timesteps: (B,) integer timesteps
         dim: embedding dimension
         max_period: controls frequency range
+        dtype: output dtype (defaults to float32, but will match model dtype for mixed precision)
     
     Returns:
         (B, dim) timestep embeddings
@@ -118,6 +120,11 @@ def timestep_embedding(
     emb = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
     if dim % 2 == 1:
         emb = torch.cat([emb, torch.zeros_like(emb[:, :1])], dim=-1)
+    
+    # Convert to target dtype if specified (for mixed precision training/inference)
+    if dtype is not None:
+        emb = emb.to(dtype)
+    
     return emb
 
 
@@ -126,19 +133,32 @@ class SinusoidalPositionalEncoding(nn.Module):
     
     def __init__(self, d_model: int, max_len: int = 512):
         super().__init__()
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float32).unsqueeze(1)
+        self.d_model = d_model
+        self.max_len = max_len
+        pe = self._create_pe(max_len, d_model)
+        self.register_buffer("pe", pe)  # (1, max_len, d_model)
+    
+    def _create_pe(self, length: int, d_model: int) -> torch.Tensor:
+        """Create positional encoding for given length."""
+        pe = torch.zeros(length, d_model)
+        position = torch.arange(0, length, dtype=torch.float32).unsqueeze(1)
         div_term = torch.exp(
             -math.log(10000.0) * torch.arange(0, d_model, 2, dtype=torch.float32) / d_model
         )
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-        self.register_buffer("pe", pe.unsqueeze(0))  # (1, max_len, d_model)
+        return pe.unsqueeze(0)  # (1, length, d_model)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """x: (B, T, d_model)"""
         _, T, _ = x.shape
-        return x + self.pe[:, :T, :]
+        
+        # Dynamically extend PE buffer if needed (for longer sequences at inference)
+        if T > self.pe.shape[1]:
+            new_pe = self._create_pe(T, self.d_model).to(x.device, x.dtype)
+            self.pe = new_pe
+        
+        return x + self.pe[:, :T, :].to(x.dtype)
 
 
 class Stage1TransformerDenoiser(nn.Module):
@@ -224,8 +244,8 @@ class Stage1TransformerDenoiser(nn.Module):
         # Project to model dimension
         h = self.input_proj(h)  # (B, T, d_model)
         
-        # Add timestep embedding
-        t_emb = timestep_embedding(t, self.d_model)  # (B, d_model)
+        # Add timestep embedding (use same dtype as input for mixed precision)
+        t_emb = timestep_embedding(t, self.d_model, dtype=x.dtype)  # (B, d_model)
         t_emb = self.time_mlp(t_emb)  # (B, d_model)
         t_emb = t_emb.unsqueeze(1).expand(-1, T, -1)  # (B, T, d_model)
         h = h + t_emb
