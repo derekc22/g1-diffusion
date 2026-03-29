@@ -722,6 +722,7 @@ def main():
     # Process files
     total_time = 0
     sample_durations = []
+    all_frame_counts = []
     apply_constraints = sample_yml.get("apply_constraints", True)
     
     for fpath in tqdm(files, desc="Processing"):
@@ -755,6 +756,7 @@ def main():
         fps = data.get("fps", 30.0)
         num_frames = result.get("root_pos", result.get("dof_pos")).shape[0] if "root_pos" in result or "dof_pos" in result else 0
         if num_frames > 0:
+            all_frame_counts.append(num_frames)
             sample_durations.append(num_frames / fps)
         
         # Save result
@@ -813,6 +815,11 @@ def main():
         print(f"  Average time: {total_time / len(files) * 1000:.2f}ms per sample")
         print(f"  Throughput: {len(files) / total_time:.2f} samples/sec")
     print(f"  Average sample duration: {avg_duration:.2f}s")
+    if all_frame_counts:
+        print(f"  Frames per motion: {int(np.mean(all_frame_counts))} avg, {min(all_frame_counts)} min, {max(all_frame_counts)} max")
+        total_frames = sum(all_frame_counts)
+        gen_fps = total_frames / total_time if total_time > 0 else 0
+        print(f"  Generated fps: {gen_fps:.1f}")
     
     # Build summary text
     summary_lines = [
@@ -827,6 +834,11 @@ def main():
             f"Throughput: {len(files) / total_time:.2f} samples/sec",
         ])
     summary_lines.append(f"Average sample duration: {avg_duration:.2f}s")
+    if all_frame_counts:
+        summary_lines.append(f"Frames per motion: {int(np.mean(all_frame_counts))} avg, {min(all_frame_counts)} min, {max(all_frame_counts)} max")
+        total_frames = sum(all_frame_counts)
+        gen_fps = total_frames / total_time if total_time > 0 else 0
+        summary_lines.append(f"Generated fps: {gen_fps:.1f}")
     
     # Save summary to file
     summary_path = os.path.join(output_dir, "performance_summary.txt")

@@ -17,13 +17,13 @@ dataset:
   window_size: 120  # Frames per window (4 seconds at 30fps)
   stride: 10        # Window stride
   min_seq_len: 30   # Minimum sequence length
-  train_split: 0.9  # Train/validation split
+  train_split: 0.99  # Train/validation split
   preload: true    # Load data lazily to avoid OOM with large datasets
 
 model:
   # Transformer denoiser
-  d_model: 256
-  nhead: 4
-  num_layers: 4  # Paper uses 4 self-attention blocks
+  d_model: 512
+  nhead: 8
+  num_layers: 8  # Paper uses 4 self-attention blocks
   dim_feedforward: 512
   dropout: 0.1

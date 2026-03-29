@@ -304,7 +304,6 @@ def main():
     apply_constraints = sample_yml.get("apply_constraints", True)
     contact_threshold = sample_yml.get("contact_threshold", 0.03)
     num_samples = sample_yml.get("num_samples", None)
-    evaluate = sample_yml.get("evaluate", False)
     seed = sample_yml.get("seed", 42)
     timesteps = sample_yml.get("timesteps", 1000)
     partial_motion_length = sample_yml.get("partial_motion_length", None)
@@ -366,6 +365,7 @@ def main():
     # Performance tracking
     total_time = 0.0
     sample_durations = []
+    all_frame_counts = []
 
     for fpath in tqdm(files, desc="Processing"):
         fname = os.path.basename(fpath)
@@ -396,10 +396,11 @@ def main():
         fps = data.get("fps", 30.0)
         # Use actual generated length instead of original object motion length
         num_frames = result["hands_raw"].shape[0]
+        all_frame_counts.append(num_frames)
         sample_durations.append(num_frames / fps)
 
         # Evaluate against GT if available
-        if evaluate and "hand_positions" in data:
+        if "hand_positions" in data:
             gt_hands = data["hand_positions"]
             pred_hands = result["hands_rectified"]
 
@@ -432,7 +433,7 @@ def main():
             pickle.dump(output_data, f)
 
     # Print evaluation summary
-    if evaluate and all_hand_jpe:
+    if all_hand_jpe:
         print("\n" + "=" * 50)
         print("Evaluation Results:")
         print(f"  Hand JPE (cm): {np.mean(all_hand_jpe):.2f} ± {np.std(all_hand_jpe):.2f}")
@@ -456,6 +457,11 @@ def main():
         print(f"  Throughput: {len(files) / total_time:.2f} samples/sec")
     if sample_durations:
         print(f"  Average sample duration: {np.mean(sample_durations):.2f}s")
+    if all_frame_counts:
+        print(f"  Frames per motion: {int(np.mean(all_frame_counts))} avg, {min(all_frame_counts)} min, {max(all_frame_counts)} max")
+        total_frames = sum(all_frame_counts)
+        gen_fps = total_frames / total_time if total_time > 0 else 0
+        print(f"  Generated fps: {gen_fps:.1f}")
     print("=" * 50)
     
     # Build and save summary text
@@ -472,8 +478,13 @@ def main():
         ])
     if sample_durations:
         summary_lines.append(f"Average sample duration: {np.mean(sample_durations):.2f}s")
+    if all_frame_counts:
+        summary_lines.append(f"Frames per motion: {int(np.mean(all_frame_counts))} avg, {min(all_frame_counts)} min, {max(all_frame_counts)} max")
+        total_frames = sum(all_frame_counts)
+        gen_fps = total_frames / total_time if total_time > 0 else 0
+        summary_lines.append(f"Generated fps: {gen_fps:.1f}")
     
-    if evaluate and all_hand_jpe:
+    if all_hand_jpe:
         summary_lines.extend([
             "",
             "Evaluation Results",

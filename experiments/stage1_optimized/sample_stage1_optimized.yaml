@@ -18,9 +18,6 @@ sample:
   # If set, generates motion of this length (in frames) instead of full object motion length
   # Set to null or omit to use full object motion length
   partial_motion_length: 120
-  
-  # Evaluation
-  evaluate: false
 
 # Inference optimization settings
 # See config/examples/ folder for preset configurations you can copy-paste

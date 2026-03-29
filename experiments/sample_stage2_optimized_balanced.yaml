@@ -19,9 +19,6 @@ sample:
   # If set, generates motion of this length (in frames) instead of full object motion length
   # Set to null or omit to use full object motion length
   partial_motion_length: 120
-  
-  # Evaluation
-  evaluate: false
 
 # Inference optimization settings
 # Applied to BOTH Stage 1 and Stage 2 models

@@ -679,10 +679,10 @@ def main():
     # Process files
     total_time = 0
     sample_durations = []
+    all_frame_counts = []
 
     apply_constraints = sample_yml.get("apply_constraints", True)
     contact_threshold = sample_yml.get("contact_threshold", 0.03)
-    evaluate = sample_yml.get("evaluate", False)
     
     all_metrics = []
     all_hand_jpe = []
@@ -717,10 +717,11 @@ def main():
         # Track sample duration
         fps = data.get("fps", 30.0)
         num_frames = result["hands_rectified"].shape[0]
+        all_frame_counts.append(num_frames)
         sample_durations.append(num_frames / fps)
         
-        # Evaluate
-        if evaluate and "hand_positions" in data:
+        # Evaluate against GT if available
+        if "hand_positions" in data:
             gt_hands = data["hand_positions"]
             pred_hands = result["hands_rectified"]
             
@@ -762,6 +763,11 @@ def main():
         print(f"  Average time: {total_time / len(files) * 1000:.2f}ms per sample")
         print(f"  Throughput: {len(files) / total_time:.2f} samples/sec")
     print(f"  Average sample duration: {avg_duration:.2f}s")
+    if all_frame_counts:
+        print(f"  Frames per motion: {int(np.mean(all_frame_counts))} avg, {min(all_frame_counts)} min, {max(all_frame_counts)} max")
+        total_frames = sum(all_frame_counts)
+        gen_fps = total_frames / total_time if total_time > 0 else 0
+        print(f"  Generated fps: {gen_fps:.1f}")
     
     # Build summary text
     summary_lines = [
@@ -776,8 +782,13 @@ def main():
             f"Throughput: {len(files) / total_time:.2f} samples/sec",
         ])
     summary_lines.append(f"Average sample duration: {avg_duration:.2f}s")
+    if all_frame_counts:
+        summary_lines.append(f"Frames per motion: {int(np.mean(all_frame_counts))} avg, {min(all_frame_counts)} min, {max(all_frame_counts)} max")
+        total_frames = sum(all_frame_counts)
+        gen_fps = total_frames / total_time if total_time > 0 else 0
+        summary_lines.append(f"Generated fps: {gen_fps:.1f}")
     
-    if evaluate and all_hand_jpe:
+    if all_hand_jpe:
         print("\nEvaluation Results:")
         print(f"  Hand JPE (cm): {np.mean(all_hand_jpe):.2f} ± {np.std(all_hand_jpe):.2f}")
         summary_lines.extend([

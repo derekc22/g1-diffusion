@@ -511,6 +511,7 @@ def main():
     # Performance tracking
     total_time = 0.0
     sample_durations = []
+    all_frame_counts = []
 
     for fpath in tqdm(files, desc="Generating"):
         fname = os.path.basename(fpath)
@@ -547,6 +548,7 @@ def main():
         fps = output_data["fps"]
         num_frames = result.get("root_pos", result.get("dof_pos")).shape[0] if "root_pos" in result or "dof_pos" in result else 0
         if num_frames > 0:
+            all_frame_counts.append(num_frames)
             sample_durations.append(num_frames / fps)
 
         # Add hand_positions for visualization compatibility
@@ -607,6 +609,11 @@ def main():
     print(f"Average time: {avg_time:.1f}ms per sample")
     print(f"Throughput: {throughput:.2f} samples/sec")
     print(f"Average sample duration: {avg_duration:.2f}s")
+    if all_frame_counts:
+        print(f"Frames per motion: {int(np.mean(all_frame_counts))} avg, {min(all_frame_counts)} min, {max(all_frame_counts)} max")
+        total_frames = sum(all_frame_counts)
+        gen_fps = total_frames / total_time if total_time > 0 else 0
+        print(f"Generated fps: {gen_fps:.1f}")
     print(f"{'='*50}")
     
     # Save summary to file
@@ -619,6 +626,11 @@ def main():
         f.write(f"Average time: {avg_time:.1f}ms per sample\n")
         f.write(f"Throughput: {throughput:.2f} samples/sec\n")
         f.write(f"Average sample duration: {avg_duration:.2f}s\n")
+        if all_frame_counts:
+            f.write(f"Frames per motion: {int(np.mean(all_frame_counts))} avg, {min(all_frame_counts)} min, {max(all_frame_counts)} max\n")
+            total_frames = sum(all_frame_counts)
+            gen_fps = total_frames / total_time if total_time > 0 else 0
+            f.write(f"Generated fps: {gen_fps:.1f}\n")
     
     print(f"\nResults saved to {output_dir}")
 
