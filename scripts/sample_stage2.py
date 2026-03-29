@@ -12,6 +12,8 @@ Usage:
 
 import os
 import sys
+import argparse
+import time
 from typing import Dict, Any, Optional, Tuple
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -68,8 +70,8 @@ class OmomoPipeline:
     
     def __init__(
         self,
-        stage1_ckpt: str,
-        stage2_ckpt: str,
+        stage1_ckpt_path: str,
+        stage2_ckpt_path: str,
         device: str = "cuda:0",
         contact_threshold: float = 0.03,
     ):
@@ -77,10 +79,10 @@ class OmomoPipeline:
         self.contact_threshold = contact_threshold
         
         # Load Stage 1
-        self.stage1_model, self.stage1_schedule, self.stage1_norm, stage1_max_len = self._load_stage1(stage1_ckpt)
+        self.stage1_model, self.stage1_schedule, self.stage1_norm, stage1_max_len = self._load_stage1(stage1_ckpt_path)
         
         # Load Stage 2  
-        self.stage2_model, self.stage2_schedule, self.stage2_norm, stage2_max_len = self._load_stage2(stage2_ckpt)
+        self.stage2_model, self.stage2_schedule, self.stage2_norm, stage2_max_len = self._load_stage2(stage2_ckpt_path)
         
         # Store max_len (use minimum of both stages for safety)
         self.max_len = min(stage1_max_len, stage2_max_len)
@@ -277,6 +279,7 @@ class OmomoPipeline:
         object_verts: Optional[np.ndarray] = None,
         object_rotation: Optional[np.ndarray] = None,
         apply_constraints: bool = True,
+        partial_motion_length: Optional[int] = None,
     ) -> Dict[str, np.ndarray]:
         """
         Generate full-body motion from object geometry.
@@ -287,6 +290,7 @@ class OmomoPipeline:
             object_verts: (T, K, 3) object vertices (for contact constraints)
             object_rotation: (T, 3, 3) object rotations (for contact constraints)
             apply_constraints: Whether to apply contact constraints
+            partial_motion_length: If set, generate motion of this length instead of full object motion length
         
         Returns:
             Dict with:
@@ -298,13 +302,35 @@ class OmomoPipeline:
                 - dof_pos: (T, Dq)
                 - truncated: bool, True if sequence was truncated
                 - original_len: int, original sequence length before truncation
+                - partial: bool, True if partial motion was generated
+                - target_len: int, the requested partial motion length (if partial)
         """
         T_original = object_centroid.shape[0]
         truncated = False
+        partial = False
+        target_len = None
+        
+        # Handle partial motion generation
+        if partial_motion_length is not None and partial_motion_length > 0:
+            if partial_motion_length < T_original:
+                # Use only the first partial_motion_length frames of object motion
+                bps_encoding = bps_encoding[:partial_motion_length]
+                object_centroid = object_centroid[:partial_motion_length]
+                if object_verts is not None:
+                    object_verts = object_verts[:partial_motion_length]
+                if object_rotation is not None:
+                    object_rotation = object_rotation[:partial_motion_length]
+                partial = True
+                target_len = partial_motion_length
+            else:
+                print(f"  Warning: partial_motion_length ({partial_motion_length}) >= object motion length ({T_original}), using full length")
+        
+        # Update T_original to reflect potential partial motion
+        T_working = object_centroid.shape[0]
         
         # Truncate if sequence exceeds max_len (positional encoding limit)
-        if T_original > self.max_len:
-            print(f"  Warning: Truncating sequence from {T_original} to {self.max_len} frames")
+        if T_working > self.max_len:
+            print(f"  Warning: Truncating sequence from {T_working} to {self.max_len} frames")
             bps_encoding = bps_encoding[:self.max_len]
             object_centroid = object_centroid[:self.max_len]
             if object_verts is not None:
@@ -401,25 +427,33 @@ class OmomoPipeline:
             "dof_pos": dof_pos,
             "truncated": truncated,
             "original_len": T_original,
+            "partial": partial,
+            "target_len": target_len,
         }
 
 
 def main():
-    yml = load_config("./config/sample_stage2.yaml")
+    parser = argparse.ArgumentParser(description="Stage 2 End-to-End Sampling")
+    parser.add_argument("--config_path", type=str, default="./config/sample_stage2.yaml",
+                        help="Path to YAML config file")
+    args = parser.parse_args()
+    
+    yml = load_config(args.config_path)
     sample_yml = yml["sample"]
 
     root_dir = yml["root_dir"]
-    stage1_ckpt = sample_yml["stage1_ckpt"]
-    stage2_ckpt = sample_yml["stage2_ckpt"]
+    stage1_ckpt_path = sample_yml["stage1_ckpt_path"]
+    stage2_ckpt_path = sample_yml["stage2_ckpt_path"]
     device = sample_yml["device"]
     apply_constraints = sample_yml.get("apply_constraints", True)
     contact_threshold = sample_yml.get("contact_threshold", 0.03)
     num_samples = sample_yml.get("num_samples", None)
     seed = sample_yml.get("seed", 42)
     timesteps = sample_yml.get("timesteps", 1000)
+    partial_motion_length = sample_yml.get("partial_motion_length", None)
 
-    if not stage1_ckpt or not stage2_ckpt:
-        raise ValueError("stage1_ckpt and stage2_ckpt must be set in config/sample_stage2.yaml")
+    if not stage1_ckpt_path or not stage2_ckpt_path:
+        raise ValueError("stage1_ckpt_path and stage2_ckpt_path must be set in config/sample_stage2.yaml")
 
     # Derive output directory from stage2 checkpoint path
     # Expected format: logs/<log_id>/checkpoints/<ckpt_file>
@@ -427,8 +461,12 @@ def main():
     from datetime import datetime
     timestamp = datetime.now().strftime("%Y%b%d_%H-%M-%S")
     
+    # Get optional experiment name for folder suffix
+    exp_name = yml.get("exp_name", "")
+    suffix = f"_{exp_name}" if exp_name else ""
+    
     # Extract log_id from checkpoint path
-    ckpt_parts = stage2_ckpt.split("/")
+    ckpt_parts = stage2_ckpt_path.split("/")
     if "logs" in ckpt_parts and "checkpoints" in ckpt_parts:
         logs_idx = ckpt_parts.index("logs")
         log_id = ckpt_parts[logs_idx + 1]
@@ -437,7 +475,7 @@ def main():
         dataset_yml = yml.get("dataset", {})
         window_size = dataset_yml.get("window_size", 120)
         stride = dataset_yml.get("stride", 10)
-        sample_folder = f"ts{timesteps}_w{window_size}_s{stride}_{timestamp}"
+        sample_folder = f"ts{timesteps}_w{window_size}_s{stride}_{timestamp}{suffix}"
         
         output_dir = os.path.join("logs", log_id, "samples", sample_folder)
     # else:
@@ -456,8 +494,8 @@ def main():
 
     # Create pipeline
     pipeline = OmomoPipeline(
-        stage1_ckpt=stage1_ckpt,
-        stage2_ckpt=stage2_ckpt,
+        stage1_ckpt_path=stage1_ckpt_path,
+        stage2_ckpt_path=stage2_ckpt_path,
         device=device,
         contact_threshold=contact_threshold,
     )
@@ -469,6 +507,11 @@ def main():
 
     print(f"\nProcessing {len(files)} files")
     print(f"Output directory: {output_dir}")
+    
+    # Performance tracking
+    total_time = 0.0
+    sample_durations = []
+    all_frame_counts = []
 
     for fpath in tqdm(files, desc="Generating"):
         fname = os.path.basename(fpath)
@@ -481,14 +524,18 @@ def main():
             print(f"  Skipping {fname}: missing object data")
             continue
 
-        # Generate
+        # Generate with timing
+        start_time = time.perf_counter()
         result = pipeline.generate(
             bps_encoding=data["bps_encoding"],
             object_centroid=data["object_centroid"],
             object_verts=data.get("object_verts"),
             object_rotation=data.get("object_rotation"),
             apply_constraints=apply_constraints,
+            partial_motion_length=partial_motion_length,
         )
+        elapsed = time.perf_counter() - start_time
+        total_time += elapsed
 
         # Save
         output_data = {
@@ -496,6 +543,13 @@ def main():
             "fps": data.get("fps", 30.0),
             **result,
         }
+        
+        # Track sample duration
+        fps = output_data["fps"]
+        num_frames = result.get("root_pos", result.get("dof_pos")).shape[0] if "root_pos" in result or "dof_pos" in result else 0
+        if num_frames > 0:
+            all_frame_counts.append(num_frames)
+            sample_durations.append(num_frames / fps)
 
         # Add hand_positions for visualization compatibility
         # (plotting script expects 'hand_positions' key)
@@ -541,6 +595,43 @@ def main():
         with open(out_path, "wb") as f:
             pickle.dump(output_data, f)
 
+    # Print and save performance summary
+    num_files = len(files)
+    avg_time = (total_time / num_files * 1000) if num_files > 0 else 0
+    throughput = num_files / total_time if total_time > 0 else 0
+    avg_duration = sum(sample_durations) / len(sample_durations) if sample_durations else 0
+    
+    print(f"\n{'='*50}")
+    print("Performance Summary")
+    print(f"{'='*50}")
+    print(f"Total files: {num_files}")
+    print(f"Total time: {total_time:.2f}s")
+    print(f"Average time: {avg_time:.1f}ms per sample")
+    print(f"Throughput: {throughput:.2f} samples/sec")
+    print(f"Average sample duration: {avg_duration:.2f}s")
+    if all_frame_counts:
+        print(f"Frames per motion: {int(np.mean(all_frame_counts))} avg, {min(all_frame_counts)} min, {max(all_frame_counts)} max")
+        total_frames = sum(all_frame_counts)
+        gen_fps = total_frames / total_time if total_time > 0 else 0
+        print(f"Generated fps: {gen_fps:.1f}")
+    print(f"{'='*50}")
+    
+    # Save summary to file
+    summary_path = os.path.join(output_dir, "performance_summary.txt")
+    with open(summary_path, "w") as f:
+        f.write("Performance Summary\n")
+        f.write("="*50 + "\n")
+        f.write(f"Total files: {num_files}\n")
+        f.write(f"Total time: {total_time:.2f}s\n")
+        f.write(f"Average time: {avg_time:.1f}ms per sample\n")
+        f.write(f"Throughput: {throughput:.2f} samples/sec\n")
+        f.write(f"Average sample duration: {avg_duration:.2f}s\n")
+        if all_frame_counts:
+            f.write(f"Frames per motion: {int(np.mean(all_frame_counts))} avg, {min(all_frame_counts)} min, {max(all_frame_counts)} max\n")
+            total_frames = sum(all_frame_counts)
+            gen_fps = total_frames / total_time if total_time > 0 else 0
+            f.write(f"Generated fps: {gen_fps:.1f}\n")
+    
     print(f"\nResults saved to {output_dir}")
 
 

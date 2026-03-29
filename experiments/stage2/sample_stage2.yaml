@@ -1,0 +1,30 @@
+root_dir: "/media/learning/DATA/export_smplx_retargeted_sub1_clothesstand"
+
+sample:
+  # Checkpoints
+  stage1_ckpt_path: "/home/learning/Documents/g1-diffusion/logs/stage1_e10000_b128_lr0.0001_ts1000_w120_s10_transformer_2026Jan10_17-14-35/checkpoints/stage1_epoch_004999.pt"  # Path to Stage 1 checkpoint
+  stage2_ckpt_path: "/home/learning/Documents/g1-diffusion/logs/stage2_e10000_b128_lr0.0001_ts1000_w120_s10_transformer_2026Jan10_17-14-49/checkpoints/stage2_epoch_008399.pt"  # Path to Stage 2 checkpoint
+  
+  device: "cuda"
+  num_samples: 10
+  timesteps: 1000
+  device: "cuda"
+  random_samples: true
+  seed: 42
+  
+  # Contact constraints (applied between Stage 1 and Stage 2)
+  apply_constraints: true
+  contact_threshold: 0.03
+  
+  # Partial motion generation (optional)
+  # If set, generates motion of this length (in frames) instead of full object motion length
+  # Set to null or omit to use full object motion length
+  partial_motion_length: 120
+
+dataset:
+  window_size: 120
+  stride: 10
+  min_seq_len: 32
+  train: false
+  train_split: 0.9
+  preload: false

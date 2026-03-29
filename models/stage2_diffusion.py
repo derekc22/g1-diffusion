@@ -54,7 +54,7 @@ class Stage2MLPModel(nn.Module):
             h = x
 
         input_dim = h.shape[-1]
-        t_emb = timestep_embedding(t, input_dim).to(h.device)
+        t_emb = timestep_embedding(t, input_dim, dtype=h.dtype).to(h.device)
         t_emb = self.time_mlp(t_emb)
         t_emb = t_emb.unsqueeze(1).expand(-1, T, -1)
         h = h + t_emb
@@ -68,29 +68,42 @@ class Stage2MLPModel(nn.Module):
 class SinusoidalPositionalEncoding(nn.Module):
     def __init__(self, d_model: int, max_len: int = 512):
         super().__init__()
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float32).unsqueeze(1)
+        self.d_model = d_model
+        self.max_len = max_len
+        pe = self._create_pe(max_len, d_model)
+        self.register_buffer("pe", pe)  # (1, max_len, d_model)
+    
+    def _create_pe(self, length: int, d_model: int) -> torch.Tensor:
+        """Create positional encoding for given length."""
+        pe = torch.zeros(length, d_model)
+        position = torch.arange(0, length, dtype=torch.float32).unsqueeze(1)
         div_term = torch.exp(
             -math.log(10000.0) * torch.arange(0, d_model, 2, dtype=torch.float32) / d_model
         )
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-        # shape: (1, max_len, d_model)
-        self.register_buffer("pe", pe.unsqueeze(0))
+        return pe.unsqueeze(0)  # (1, length, d_model)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         x: (B, T, d_model)
         """
         _, T, _ = x.shape
-        return x + self.pe[:, :T, :]
+        
+        # Dynamically extend PE buffer if needed (for longer sequences at inference)
+        if T > self.pe.shape[1]:
+            new_pe = self._create_pe(T, self.d_model).to(x.device, x.dtype)
+            self.pe = new_pe
+        
+        return x + self.pe[:, :T, :].to(x.dtype)
 
 
-def timestep_embedding(timesteps: torch.Tensor, dim: int, max_period: float = 10000.0) -> torch.Tensor:
+def timestep_embedding(timesteps: torch.Tensor, dim: int, max_period: float = 10000.0, dtype: torch.dtype = None) -> torch.Tensor:
     """
     Standard sinusoidal timestep embedding used in diffusion models.
 
     timesteps: (B,) integer timesteps
+    dtype: output dtype (for mixed precision support)
     returns: (B, dim)
     """
     half = dim // 2
@@ -102,6 +115,11 @@ def timestep_embedding(timesteps: torch.Tensor, dim: int, max_period: float = 10
     if dim % 2 == 1:
         # pad one dimension if dim is odd
         emb = torch.cat([emb, torch.zeros_like(emb[:, :1])], dim=-1)
+    
+    # Convert to target dtype if specified (for mixed precision)
+    if dtype is not None:
+        emb = emb.to(dtype)
+    
     return emb
 
 
@@ -186,7 +204,7 @@ class Stage2TransformerModel(nn.Module):
         h = self.state_proj(x_in)  # (B, T, d_model)
 
         # Add timestep embedding (same for all time steps in a sequence)
-        t_emb = timestep_embedding(t, self.d_model)       # (B, d_model)
+        t_emb = timestep_embedding(t, self.d_model, dtype=x.dtype)  # (B, d_model)
         t_emb = self.time_mlp(t_emb)                      # (B, d_model)
         t_emb = t_emb.unsqueeze(1).expand(-1, T, -1)      # (B, T, d_model)
         h = h + t_emb

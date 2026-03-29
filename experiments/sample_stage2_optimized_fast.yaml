@@ -1,0 +1,55 @@
+# Stage 2 Optimized End-to-End Pipeline Configuration
+# Object Geometry → Hand Positions → Full Body Motion
+
+# Base paths
+root_dir: "/media/learning/DATA/export_smplx_retargeted_sub1_clothesstand"
+
+sample:
+  stage1_ckpt_path: "/home/learning/Documents/g1-diffusion/logs/stage1_e10000_b128_lr0.0001_ts1000_w120_s10_transformer_2026Jan10_17-14-35/checkpoints/stage1_epoch_004999.pt"  # Path to Stage 1 checkpoint
+  stage2_ckpt_path: "/home/learning/Documents/g1-diffusion/logs/stage2_e10000_b128_lr0.0001_ts1000_w120_s10_transformer_2026Jan10_17-14-49/checkpoints/stage2_epoch_008399.pt"  # Path to Stage 2 checkpoint
+  device: "cuda"
+  seed: 42
+  num_samples: 10  # null = process all files
+  
+  # Contact constraints (applied between Stage 1 and Stage 2)
+  apply_constraints: true
+  contact_threshold: 0.03
+  
+  # Partial motion generation (optional)
+  # If set, generates motion of this length (in frames) instead of full object motion length
+  # Set to null or omit to use full object motion length
+  partial_motion_length: 120
+
+# Inference optimization settings
+# Applied to BOTH Stage 1 and Stage 2 models
+# See config/examples/ folder for preset configurations you can copy-paste
+
+# Fast Optimization Settings
+# Prioritizes speed with minimal quality loss
+# DDIM with 50 steps, FP16 precision
+
+optimization:
+  # Precision: "fp32", "fp16", "bf16"
+  precision: "fp16"
+  
+  # Sampler: "ddpm", "ddim", "dpm_solver"
+  sampler: "ddim"
+  
+  # Number of inference steps
+  num_inference_steps: 50
+  
+  # DDIM eta: 0.0 = deterministic, 1.0 = full stochasticity
+  ddim_eta: 0.0
+  
+  # torch.compile settings (PyTorch 2.0+)
+  use_torch_compile: true
+  compile_mode: "reduce-overhead"
+  compile_fullgraph: false
+  
+  # Warmup iterations
+  warmup_iterations: 3
+
+# Experiment name (optional): appended to sample folder name
+exp_name: "optimized_fast"
+
+

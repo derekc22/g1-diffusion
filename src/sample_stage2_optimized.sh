@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -e  # exit immediately on first error
 
-# Run all Stage 1 experiment configs in experiments/stage1/
-# Usage: ./src/sample_stage1_all.sh
+# Run all Stage 2 Optimized experiment configs in experiments/stage2_optimized/
+# Usage: ./src/sample_stage2_optimized_all.sh
 
 # Initialize conda for this non-interactive shell
 source /home/learning/miniconda3/etc/profile.d/conda.sh
 
-EXPERIMENTS_DIR="/home/learning/Documents/g1-diffusion/experiments/stage1"
+EXPERIMENTS_DIR="/home/learning/Documents/g1-diffusion/experiments/stage2_optimized"
 
 conda activate g1-diffusion
 cd /home/learning/Documents/g1-diffusion
@@ -32,11 +32,11 @@ for config_path in "${configs[@]}"; do
     echo "Running experiment: $config_name"
     echo "=================================================="
     
-    python scripts/sample_stage1.py --config_path "$config_path"
+    python scripts/sample_stage2_optimized.py --config_path "$config_path"
     
     echo ""
     echo "Completed: $config_name"
     echo ""
 done
 
-echo "All Stage 1 experiments completed!"
+echo "All Stage 2 Optimized experiments completed!"
