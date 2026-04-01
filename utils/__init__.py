@@ -14,6 +14,16 @@ from .inference_optimization import (
     TensorRTConverter,
 )
 
+from .flow_matching import (
+    FlowMatchingConfig,
+    FlowMatchingSchedule,
+    euler_solve,
+    midpoint_solve,
+    rk4_solve,
+    get_ode_solver,
+    flow_matching_timestep_embedding,
+)
+
 __all__ = [
     # Inference optimization
     "InferenceConfig",
@@ -27,4 +37,12 @@ __all__ = [
     "get_optimal_config",
     "ONNXExporter",
     "TensorRTConverter",
+    # Flow matching
+    "FlowMatchingConfig",
+    "FlowMatchingSchedule",
+    "euler_solve",
+    "midpoint_solve",
+    "rk4_solve",
+    "get_ode_solver",
+    "flow_matching_timestep_embedding",
 ]

@@ -8,7 +8,7 @@ set -e  # exit immediately on first error
 source /home/learning/miniconda3/etc/profile.d/conda.sh
 
 # Parent folder containing all sample subfolders
-ROBOT_MOTION_FOLDER_ALL="/home/learning/Documents/g1-diffusion/logs/stage2_e10000_b128_lr0.0001_ts1000_w120_s10_transformer_2026Feb15_21-41-59/samples"
+ROBOT_MOTION_FOLDER_ALL="/home/learning/Documents/g1-diffusion/logs/stage2_hf_e10000_b128_lr0.0001_ts1000_w120_s10_transformer_2026Apr01_00-40-53/samples"
 SAVE_DIR="/home/learning/Documents/g1-diffusion/videos"
 
 mkdir -p "$SAVE_DIR"

@@ -1,0 +1,49 @@
+# Stage 2 Flow Matching Training Configuration
+# Hand Positions → Full-Body Motion (OT-CFM)
+#
+# This mirrors train_stage2.yaml but uses flow matching instead of DDPM.
+# The model architecture (transformer) is identical —
+# only the training loss and sampling procedure differ.
+
+root_dir: "/media/learning/DATA/export_smplx_retargeted_sub1_clothesstand"
+
+train:
+  batch_size: 128
+  num_epochs: 10000
+  lr: 1e-4
+  device: "cuda:0"
+  architecture: "transformer"  # or "mlp"
+  save_dir: "./logs"
+  save_every: 100
+
+  # Flow matching specific
+  generative_model: "flow_matching"
+  sigma_min: 1e-4
+  num_inference_steps: 50
+  ode_solver: "euler"
+
+  # Timestep sampling strategy (critical for quality!)
+  # "uniform":      t ~ U[0,1]  (baseline — weak at edge timesteps)
+  # "logit_normal": t = sigmoid(N(mu, sigma))  (SD3 style, good default)
+  # "beta":         t ~ Beta(a, b)  (a=b=0.5 → U-shaped = more edge weight)
+  # "cosmap":       cosine-mapped  (more weight at t≈0 and t≈1)
+  timestep_sampling: "uniform"
+  logit_normal_mean: 0.0   # 0.0 = symmetric, negative = bias toward t=0
+  logit_normal_std: 1.0    # lower = more concentrated at center
+  # beta_alpha: 0.5  # only used if timestep_sampling=beta
+  # beta_beta: 0.5   # only used if timestep_sampling=beta
+
+dataset:
+  window_size: 120
+  stride: 10
+  min_seq_len: 30
+  train_split: 0.99
+  preload: true
+
+model:
+  # Transformer velocity predictor (same architecture as DDPM denoiser)
+  d_model: 512
+  nhead: 8
+  num_layers: 8
+  dim_feedforward: 512
+  dropout: 0.1

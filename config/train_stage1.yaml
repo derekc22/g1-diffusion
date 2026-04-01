@@ -5,7 +5,7 @@ root_dir: "/media/learning/DATA/export_smplx_retargeted_sub1_clothesstand"
 
 train:
   batch_size: 128
-  num_epochs: 10000
+  num_epochs: 500
   lr: 1e-4
   timesteps: 1000  # Diffusion timesteps
   device: "cuda:0"

@@ -1,0 +1,52 @@
+# Stage 1 Flow Matching Training Configuration
+# Object Geometry → Hand Positions (OT-CFM)
+#
+# This mirrors train_stage1.yaml but uses flow matching instead of DDPM.
+# The model architecture (encoder + transformer) is identical —
+# only the training loss and sampling procedure differ.
+
+root_dir: "/media/learning/DATA/export_smplx_retargeted_sub1_clothesstand"
+
+train:
+  batch_size: 128
+  num_epochs: 1000
+  lr: 1e-4
+  device: "cuda:0"
+  architecture: "transformer"  # or "mlp"
+  save_dir: "./logs"
+  save_every: 100
+
+  # Flow matching specific
+  generative_model: "flow_matching"  # identifies this as FM (vs "ddpm")
+  sigma_min: 1e-4  # minimum noise level
+  num_inference_steps: 50  # ODE steps for validation sampling
+  ode_solver: "euler"  # "euler", "midpoint", "rk4"
+
+  # Timestep sampling strategy (critical for quality!)
+  # "uniform":      t ~ U[0,1]  (baseline — weak at edge timesteps)
+  # "logit_normal": t = sigmoid(N(mu, sigma))  (SD3 style, good default)
+  # "beta":         t ~ Beta(a, b)  (a=b=0.5 → U-shaped = more edge weight)
+  # "cosmap":       cosine-mapped  (more weight at t≈0 and t≈1)
+  timestep_sampling: "uniform"
+  logit_normal_mean: 0.0
+  logit_normal_std: 1.0
+
+dataset:
+  window_size: 120
+  stride: 10
+  min_seq_len: 30
+  train_split: 0.9
+  preload: true
+
+model:
+  # Object Geometry Encoder (same as DDPM)
+  encoder_hidden: 512
+  encoder_layers: 3
+  object_feature_dim: 256
+
+  # Transformer velocity predictor (same architecture as DDPM denoiser)
+  d_model: 256
+  nhead: 4
+  num_layers: 4
+  dim_feedforward: 512
+  dropout: 0.1

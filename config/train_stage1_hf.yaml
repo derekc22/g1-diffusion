@@ -1,0 +1,42 @@
+# Stage 1 DDPM Training Configuration — HuggingFace Dataset
+# Object Motion Features → Hand Positions
+#
+# Uses compact object motion features (15D) instead of BPS encoding (3075D).
+# Object features = [pos(3), rot_6d(6), lin_vel(3), ang_vel(3)]
+#
+# Settings matched to past successful run:
+#   logs/stage1_e10000_b128_lr0.0001_ts1000_w120_s10_transformer_2026Jan10_17-14-35
+
+root_dir: "./data/hf_preprocessed"
+
+train:
+  batch_size: 128
+  num_epochs: 10000
+  lr: 1e-4
+  timesteps: 1000       # DDPM diffusion timesteps
+  device: "cuda:0"
+  architecture: "transformer"  # or "mlp"
+  save_dir: "./logs"
+  save_every: 100        # Save checkpoint every N epochs
+
+dataset:
+  window_size: 120       # Frames per window (4 seconds at 30fps)
+  stride: 10             # Window stride
+  min_seq_len: 30        # Minimum sequence length
+  train_split: 0.9       # Train/validation split ratio
+  preload: true          # Preload all data into memory
+  require_object: false  # Set true to only use motions with object data
+
+model:
+  # Object motion encoder (MLP)
+  object_feature_input_dim: 15  # [pos(3), rot_6d(6), lin_vel(3), ang_vel(3)]
+  encoder_hidden: 512
+  encoder_layers: 3
+  object_feature_dim: 256       # Output dimension of motion encoder
+
+  # Transformer denoiser
+  d_model: 256
+  nhead: 4
+  num_layers: 4
+  dim_feedforward: 512
+  dropout: 0.1

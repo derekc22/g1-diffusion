@@ -1,0 +1,30 @@
+# Stage 1 HF Sampling Configuration
+# Object Motion Features (15D) → Hand Positions
+#
+# Place experiment configs in experiments/stage1_hf/ and run via:
+#   ./src/sample_stage1_hf.sh
+
+root_dir: "./data/hf_preprocessed"
+
+sample:
+  ckpt_path: "logs/stage1_hf_e10000_b128_lr0.0001_ts1000_w120_s10_transformer_2026Apr01_00-26-59/checkpoints/stage1_hf_epoch_000199.pt"
+  num_samples: 10  # null = process all files
+  timesteps: 1000
+  device: "cuda"
+  seed: 42
+
+  # Contact constraints
+  apply_constraints: true
+  contact_threshold: 0.03
+
+  # Partial motion generation (optional)
+  # Set to null or omit to use full object motion length
+  partial_motion_length: 120
+
+dataset:
+  window_size: 120
+  stride: 10
+  min_seq_len: 32
+  train: false
+  train_split: 0.9
+  preload: false

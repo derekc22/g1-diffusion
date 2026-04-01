@@ -1,0 +1,32 @@
+# Stage 2 Flow Matching End-to-End Sampling Configuration
+# Object Geometry → Hand Positions → Full Body Motion (via ODE integration)
+
+root_dir: "/media/learning/DATA/export_smplx_retargeted_sub1_clothesstand"
+
+sample:
+  # Checkpoints — fill in with your trained FM model paths
+  stage1_ckpt_path: "logs/stage1_fm_e500_b128_lr0.0001_w120_s10_transformer_2026Mar29_20-36-16/checkpoints/stage1_fm_epoch_000499.pt"  # Path to Stage 1 FM checkpoint
+  stage2_ckpt_path: "logs/stage2_fm_e10000_b128_lr0.0001_w120_s10_transformer_2026Mar30_08-35-37/checkpoints/stage2_fm_epoch_009999.pt"  # Path to Stage 2 FM checkpoint
+  
+  device: "cuda"
+  num_samples: 10
+  seed: 42
+  
+  # Flow matching inference settings
+  num_inference_steps: 50  # ODE integration steps
+  ode_solver: "euler"  # "euler", "midpoint", "rk4"
+  
+  # Contact constraints (applied between Stage 1 and Stage 2)
+  apply_constraints: true
+  contact_threshold: 0.03
+  
+  # Partial motion generation
+  partial_motion_length: 120
+
+dataset:
+  window_size: 120
+  stride: 10
+  min_seq_len: 32
+  train: false
+  train_split: 0.9
+  preload: false

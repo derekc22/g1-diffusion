@@ -1,0 +1,33 @@
+# Stage 2 FM Optimized — Fast Preset
+# Object Geometry → Hand Positions → Full Body Motion (Flow Matching)
+#
+# Euler solver × 50 steps = 50 NFE.  Fast with decent quality.
+
+root_dir: "/media/learning/DATA/export_smplx_retargeted_sub1_clothesstand"
+
+sample:
+  stage1_ckpt_path: "logs/stage1_fm_e500_b128_lr0.0001_w120_s10_transformer_2026Mar29_20-36-16/checkpoints/stage1_fm_epoch_000499.pt"
+  stage2_ckpt_path: "logs/stage2_fm_e10000_b128_lr0.0001_w120_s10_transformer_2026Mar29_20-52-56/checkpoints/stage2_fm_epoch_000999.pt"
+  device: "cuda"
+  seed: 42
+  num_samples: 10  # null = process all files
+
+  # Flow matching inference — Euler × 50 steps = 50 NFE
+  num_inference_steps: 50
+  ode_solver: "euler"  # "euler" (fast), "midpoint" (balanced), "rk4" (quality)
+
+  # Contact constraints
+  apply_constraints: true
+  contact_threshold: 0.03
+
+  # Partial motion generation (optional)
+  # Set to null or omit to use full object motion length
+  partial_motion_length: 120
+
+optimization:
+  precision: "fp16"  # "fp32", "fp16", "bf16"
+  use_torch_compile: true
+  compile_mode: "reduce-overhead"  # "default", "reduce-overhead", "max-autotune"
+  warmup_iterations: 3
+
+exp_name: "fm_optimized_fast"

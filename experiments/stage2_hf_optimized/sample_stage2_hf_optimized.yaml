@@ -1,0 +1,61 @@
+# Stage 2 HF Optimized End-to-End Pipeline Configuration
+# Object Motion Features → Hand Positions → Full Body Motion
+#
+# With inference optimizations: DDIM, FP16, torch.compile
+# Mirrors: logs/stage2_e10000_.../samples/ts1000_w120_s10_..._optimized_custom
+#
+# Place experiment configs in experiments/stage2_hf_optimized/ and run via:
+#   ./src/sample_stage2_hf_optimized.sh
+
+exp_name: optimized_custom
+root_dir: /media/learning/DATA/export_smplx_retargeted_sub1_clothesstand
+
+sample:
+  # Checkpoints — latest from HF training runs
+  stage1_ckpt_path: /home/learning/Documents/g1-diffusion/logs/stage1_hf_e10000_b128_lr0.0001_ts1000_w120_s10_transformer_2026Mar31_22-06-50/checkpoints/stage1_hf_epoch_001699.pt
+  stage2_ckpt_path: /home/learning/Documents/g1-diffusion/logs/stage2_hf_e10000_b128_lr0.0001_ts1000_w120_s10_transformer_2026Mar31_22-31-18/checkpoints/stage2_hf_epoch_001899.pt
+
+  device: "cuda"
+  num_samples: 10
+  seed: 42
+
+  # Contact constraints (applied between Stage 1 and Stage 2)
+  apply_constraints: true
+  contact_threshold: 0.03
+
+  # Partial motion generation
+  partial_motion_length: 60
+
+dataset:
+  window_size: 120
+  stride: 10
+
+# Inference optimization settings — matching reference optimized_custom config
+optimization:
+  # Precision: "fp32", "fp16", "bf16"
+  precision: "fp16"
+
+  # Sampler: "ddpm", "ddim", "dpm_solver"
+  sampler: "ddim"
+
+  # DDIM with only 2 steps (aggressive, matching reference config)
+  num_inference_steps: 2
+
+  # DDIM eta: 0.0 = deterministic
+  ddim_eta: 0.0
+
+  # torch.compile settings (PyTorch 2.0+)
+  use_torch_compile: true
+  compile_mode: "reduce-overhead"
+  compile_fullgraph: false
+
+  # Warmup iterations for consistent performance
+  warmup_iterations: 10
+
+dataset:
+  window_size: 120
+  stride: 10
+  min_seq_len: 32
+  train: false
+  train_split: 0.9
+  preload: false
