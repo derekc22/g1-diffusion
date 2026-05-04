@@ -8,7 +8,10 @@ set -e  # exit immediately on first error
 source /home/learning/miniconda3/etc/profile.d/conda.sh
 
 # Parent folder containing all sample subfolders
-ROBOT_MOTION_MODEL_FOLDER_ALL="/home/learning/Documents/g1-diffusion/logs/stage2_fm_e10000_b128_lr0.0001_w120_s10_transformer_2026Mar29_20-52-56/samples"
+# ROBOT_MOTION_MODEL_FOLDER_ALL="/home/learning/Documents/g1-diffusion/logs/stage2_e10000_b128_lr0.0001_ts1000_w120_s10_transformer_2026Feb15_21-41-59/samples"
+# ROBOT_MOTION_MODEL_FOLDER_ALL="/home/learning/Documents/g1-diffusion/logs/stage2_e10000_b128_lr0.0001_ts1000_w120_s10_mlp_2026Apr26_22-28-43/samples"
+# ROBOT_MOTION_MODEL_FOLDER_ALL="/home/learning/Documents/g1-diffusion/logs/stage2_e10000_b128_lr0.0001_ts1000_w120_s10_transformer_2026Apr26_23-13-53/samples"
+ROBOT_MOTION_MODEL_FOLDER_ALL="/home/learning/Documents/g1-diffusion/logs/stage2_e10000_b128_lr0.0001_ts1000_w120_s10_transformer_2026Apr27_01-32-49/samples"
 ROBOT_MOTION_RETARGETED_FOLDER="/media/learning/DATA/export_smplx_retargeted_sub1_clothesstand"
 SAVE_DIR="/home/learning/Documents/g1-diffusion/figures/compare"
 

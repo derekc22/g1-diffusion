@@ -19,12 +19,20 @@ dataset:
   min_seq_len: 30   # Minimum sequence length
   train_split: 0.9  # Train/validation split
   preload: true    # Load data lazily to avoid OOM with large datasets
+  # variant0: exact object trajectory
+  # variant1: initial/final object frames only
+  # variant2: linear interpolation between initial/final object frames
+  object_conditioning_variant: "variant0"
 
 model:
   # Object Geometry Encoder (MLP)
   encoder_hidden: 512
   encoder_layers: 3
   object_feature_dim: 256  # Output dimension of geometry encoder (O_t in paper)
+
+  # MLP denoiser (used when train.architecture: "mlp")
+  denoiser_hidden: 512
+  denoiser_layers: 4
   
   # Transformer denoiser
   d_model: 256

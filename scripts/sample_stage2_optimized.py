@@ -52,6 +52,11 @@ from utils.inference_optimization import (
 from utils.contact_constraints import apply_contact_constraints, ContactConstraintProcessor
 from utils.rotation import rot6d_to_quat_xyzw, mat_to_quat_xyzw
 from utils.general import load_config
+from utils.object_conditioning import (
+    apply_object_conditioning_variant,
+    describe_object_conditioning_variant,
+    normalize_object_conditioning_variant,
+)
 
 # ---------------------------------------------------------------------------
 # Compatibility shim for pickles created by NumPy >= 2.0
@@ -117,6 +122,10 @@ class OptimizedOmomoPipeline:
             self.stage2_max_len,
             self.state_dim,
         ) = self._load_stage2(stage2_ckpt_path)
+        self.object_conditioning_variant = normalize_object_conditioning_variant(
+            self.stage1_checkpoint_variant
+        )
+        print(f"Object conditioning: {describe_object_conditioning_variant(self.object_conditioning_variant)}")
         
         # Apply optimizations
         self._apply_optimizations()
@@ -136,6 +145,9 @@ class OptimizedOmomoPipeline:
         arch = config.get("train", {}).get("architecture", "transformer")
         model_cfg = config.get("model", {})
         dataset_cfg = config.get("dataset", {})
+        self.stage1_checkpoint_variant = normalize_object_conditioning_variant(
+            dataset_cfg.get("object_conditioning_variant", "variant0")
+        )
         
         window_size = dataset_cfg.get("window_size", 120)
         max_len = model_cfg.get("max_len", window_size + 100)
@@ -159,8 +171,12 @@ class OptimizedOmomoPipeline:
             model = Stage1HandDiffusionMLP(
                 bps_dim=model_cfg.get("bps_dim", 3072),
                 centroid_dim=model_cfg.get("centroid_dim", 3),
+                encoder_hidden=model_cfg.get("encoder_hidden", 512),
                 object_feature_dim=model_cfg.get("object_feature_dim", 256),
-                hand_dim=6,
+                encoder_layers=model_cfg.get("encoder_layers", 3),
+                hand_dim=model_cfg.get("hand_dim", 6),
+                denoiser_hidden=model_cfg.get("denoiser_hidden", 512),
+                denoiser_layers=model_cfg.get("denoiser_layers", 4),
             )
         
         model.load_state_dict(ckpt["model"])
@@ -214,6 +230,8 @@ class OptimizedOmomoPipeline:
             model = Stage2MLPModel(
                 state_dim=state_dim,
                 cond_dim=cond_dim,
+                hidden_dim=model_cfg.get("mlp_hidden", 512),
+                num_layers=model_cfg.get("mlp_layers", 4),
             )
         
         model.load_state_dict(ckpt["model"])
@@ -509,6 +527,14 @@ class OptimizedOmomoPipeline:
                 object_rotation = object_rotation[:max_len]
             truncated = True
         
+        object_conditioning = apply_object_conditioning_variant(
+            variant=self.object_conditioning_variant,
+            bps_encoding=bps_encoding,
+            object_centroid=object_centroid,
+        )
+        bps_encoding = object_conditioning["bps_encoding"]
+        object_centroid = object_conditioning["object_centroid"]
+
         # Prepare inputs
         bps = torch.from_numpy(bps_encoding).to(self.device, dtype=self.dtype)
         centroid = torch.from_numpy(object_centroid).to(self.device, dtype=self.dtype)
@@ -584,6 +610,7 @@ class OptimizedOmomoPipeline:
             "original_len": T_original,
             "partial": partial,
             "target_len": target_len,
+            "object_conditioning_variant": self.object_conditioning_variant,
         }
 
 
@@ -704,6 +731,7 @@ def main():
     
     print(f"\nProcessing {len(files)} files")
     print(f"Output directory: {output_dir}")
+    print(f"Object conditioning: {describe_object_conditioning_variant(pipeline.object_conditioning_variant)}")
     
     # Warmup
     if files:
@@ -781,6 +809,9 @@ def main():
             obj_rot_mat_t = torch.from_numpy(obj_rot_mat).float()
             obj_rot_quat = mat_to_quat_xyzw(obj_rot_mat_t).numpy()  # (T, 4) xyzw
             output_data["object_rot"] = obj_rot_quat
+        for key in ("object_name", "mesh_file", "num_verts", "is_articulated", "object_mesh_scale"):
+            if key in data:
+                output_data[key] = data[key]
         
         # Copy local_body_pos and link_body_list from source data
         if "local_body_pos" in data:

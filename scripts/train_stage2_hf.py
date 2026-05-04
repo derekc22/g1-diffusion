@@ -88,13 +88,6 @@ def main():
     train_split = dataset_yml["train_split"]
     preload = dataset_yml.get("preload", True)
 
-    # Model config
-    d_model = model_yml["d_model"]
-    nhead = model_yml["nhead"]
-    num_layers = model_yml["num_layers"]
-    dim_feedforward = model_yml["dim_feedforward"]
-    dropout = model_yml["dropout"]
-
     # Create experiment directory
     dtn = datetime.now().strftime("%Y%b%d_%H-%M-%S")
     exp_name = f"stage2_hf_e{num_epochs}_b{batch_size}_lr{lr}_ts{timesteps}_w{window_size}_s{stride}_{architecture}_"
@@ -155,19 +148,19 @@ def main():
         model = Stage2TransformerModel(
             state_dim=state_dim,
             cond_dim=cond_dim,
-            d_model=d_model,
-            nhead=nhead,
-            num_layers=num_layers,
-            dim_feedforward=dim_feedforward,
-            dropout=dropout,
+            d_model=model_yml["d_model"],
+            nhead=model_yml["nhead"],
+            num_layers=model_yml["num_layers"],
+            dim_feedforward=model_yml["dim_feedforward"],
+            dropout=model_yml["dropout"],
             max_len=window_size + 100,
         ).to(device)
     else:
         model = Stage2MLPModel(
             state_dim=state_dim,
             cond_dim=cond_dim,
-            hidden_dim=512,
-            num_layers=4,
+            hidden_dim=model_yml.get("mlp_hidden", 512),
+            num_layers=model_yml.get("mlp_layers", 4),
         ).to(device)
 
     num_params = sum(p.numel() for p in model.parameters())

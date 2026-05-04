@@ -5,8 +5,17 @@
 root_dir: "/media/learning/DATA/export_smplx_retargeted_sub1_clothesstand"
 
 sample:
-  stage1_ckpt_path: "/home/learning/Documents/g1-diffusion/logs/stage1_e10000_b128_lr0.0001_ts1000_w120_s10_transformer_2026Jan10_17-14-35/checkpoints/stage1_epoch_004999.pt"  # Path to Stage 1 checkpoint
-  stage2_ckpt_path: "/home/learning/Documents/g1-diffusion/logs/stage2_e10000_b128_lr0.0001_ts1000_w120_s10_transformer_2026Feb15_21-41-59/checkpoints/stage2_epoch_001299.pt"  # Path to Stage 2 checkpoint
+  # stage1_ckpt_path: "/home/learning/Documents/g1-diffusion/logs/stage1_variant1_e500_b128_lr0.0001_ts1000_w120_s10_transformer_2026Apr26_15-32-04/checkpoints/stage1_epoch_000499.pt"  # Path to Stage 1 checkpoint
+  stage1_ckpt_path: "/home/learning/Documents/g1-diffusion/logs/stage1_variant2_e500_b128_lr0.0001_ts1000_w120_s10_transformer_2026Apr26_15-44-50/checkpoints/stage1_epoch_000499.pt"  # Path to Stage 1 checkpoint
+  
+  # stage1_ckpt_path: "/home/learning/Documents/g1-diffusion/logs/stage1_variant1_e500_b128_lr0.0001_ts1000_w120_s10_mlp_2026Apr26_19-50-03/checkpoints/stage1_epoch_000499.pt"  # Path to Stage 1 checkpoint
+  # stage1_ckpt_path: "/home/learning/Documents/g1-diffusion/logs/stage1_variant2_e500_b128_lr0.0001_ts1000_w120_s10_mlp_2026Apr26_20-01-08/checkpoints/stage1_epoch_000499.pt"  # Path to Stage 1 checkpoint
+  
+  # stage2_ckpt_path: "/home/learning/Documents/g1-diffusion/logs/stage2_e10000_b128_lr0.0001_ts1000_w120_s10_transformer_2026Feb15_21-41-59/checkpoints/stage2_epoch_001299.pt"  # Path to Stage 2 checkpoint
+  # stage2_ckpt_path: "/home/learning/Documents/g1-diffusion/logs/stage2_e10000_b128_lr0.0001_ts1000_w120_s10_transformer_2026Apr26_23-13-53/checkpoints/stage2_epoch_001299.pt" # Path to Stage 2 checkpoint
+  stage2_ckpt_path: "/home/learning/Documents/g1-diffusion/logs/stage2_e10000_b128_lr0.0001_ts1000_w120_s10_transformer_2026Apr27_01-32-49/checkpoints/stage2_epoch_000299.pt" # Path to Stage 2 checkpoint
+  # stage2_ckpt_path: "/home/learning/Documents/g1-diffusion/logs/stage2_e10000_b128_lr0.0001_ts1000_w120_s10_mlp_2026Apr26_22-28-43/checkpoints/stage2_epoch_001299.pt"  # Path to Stage 2 checkpoint
+
   device: "cuda"
   seed: 42
   num_samples: 10  # null = process all files
@@ -18,7 +27,7 @@ sample:
   # Partial motion generation (optional)
   # If set, generates motion of this length (in frames) instead of full object motion length
   # Set to null or omit to use full object motion length
-  partial_motion_length: 60
+  partial_motion_length: 120
 
 # Inference optimization settings
 # Applied to BOTH Stage 1 and Stage 2 models
@@ -36,7 +45,7 @@ optimization:
   sampler: "ddim"
   
   # Number of inference steps
-  num_inference_steps: 2
+  num_inference_steps: 5
   
   # DDIM eta: 0.0 = deterministic, 1.0 = full stochasticity
   ddim_eta: 0.0
@@ -50,6 +59,6 @@ optimization:
   warmup_iterations: 10
 
 # Experiment name (optional): appended to sample folder name
-exp_name: "optimized_custom"
+exp_name: "optimized_fast_variant2_SPEED_TEST_IGNORE"
 
 

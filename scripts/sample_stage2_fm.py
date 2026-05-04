@@ -57,9 +57,7 @@ if "numpy._core.umath" not in sys.modules:
 # ---------------------------------------------------------------------------
 
 
-# Import the pipeline class from the root-level script
-sys.path.insert(0, PROJECT_ROOT)
-from sample_stage2_fm import FlowMatchingPipeline
+from pipelines.stage2_fm import FlowMatchingPipeline
 
 
 def main():
@@ -188,6 +186,9 @@ def main():
             obj_rot_mat_t = torch.from_numpy(obj_rot_mat).float()
             obj_rot_quat = mat_to_quat_xyzw(obj_rot_mat_t).numpy()
             output_data["object_rot"] = obj_rot_quat
+        for key in ("object_name", "mesh_file", "num_verts", "is_articulated"):
+            if key in data:
+                output_data[key] = data[key]
         if "local_body_pos" in data:
             output_data["local_body_pos"] = data["local_body_pos"]
         if "link_body_list" in data:

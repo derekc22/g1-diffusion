@@ -23,13 +23,13 @@ echo ""
 # Stage 1
 echo ">>> Stage 1: Object Motion → Hand Positions"
 echo "--------------------------------------------"
-python scripts/train_stage1_hf.py
+./src/train_stage1_hf.sh
 echo ""
 
 # Stage 2
 echo ">>> Stage 2: Hand Positions → Full-Body Motion"
 echo "--------------------------------------------"
-python scripts/train_stage2_hf.py
+./src/train_stage2_hf.sh
 echo ""
 
 echo "============================================"

@@ -41,6 +41,10 @@ dataset:
   preload: true
 
 model:
+  # MLP velocity predictor (used when train.architecture: "mlp")
+  mlp_hidden: 512
+  mlp_layers: 4
+
   # Transformer velocity predictor (same architecture as DDPM denoiser)
   d_model: 512
   nhead: 8

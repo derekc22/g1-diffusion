@@ -34,6 +34,11 @@ from utils.diffusion import DiffusionConfig, DiffusionSchedule
 from utils.contact_constraints import apply_contact_constraints, ContactConstraintProcessor
 from utils.rotation import rot6d_to_quat_xyzw, mat_to_quat_xyzw
 from utils.general import load_config
+from utils.object_conditioning import (
+    apply_object_conditioning_variant,
+    describe_object_conditioning_variant,
+    normalize_object_conditioning_variant,
+)
 
 # ---------------------------------------------------------------------------
 # Compatibility shim for pickles created by NumPy >= 2.0
@@ -86,6 +91,10 @@ class OmomoPipeline:
         
         # Store max_len (use minimum of both stages for safety)
         self.max_len = min(stage1_max_len, stage2_max_len)
+        self.object_conditioning_variant = normalize_object_conditioning_variant(
+            self.stage1_checkpoint_variant
+        )
+        print(f"Object conditioning: {describe_object_conditioning_variant(self.object_conditioning_variant)}")
         
         # Contact processor
         self.contact_processor = ContactConstraintProcessor(contact_threshold=contact_threshold)
@@ -96,6 +105,9 @@ class OmomoPipeline:
         ckpt = torch.load(ckpt_path, map_location=self.device)
         
         config = ckpt["config"]
+        self.stage1_checkpoint_variant = normalize_object_conditioning_variant(
+            config.get("dataset", {}).get("object_conditioning_variant", "variant0")
+        )
         arch = config.get("train", {}).get("architecture", "transformer")
         model_cfg = config.get("model", {})
         dataset_cfg = config.get("dataset", {})
@@ -123,8 +135,12 @@ class OmomoPipeline:
             model = Stage1HandDiffusionMLP(
                 bps_dim=model_cfg.get("bps_dim", 3072),
                 centroid_dim=model_cfg.get("centroid_dim", 3),
+                encoder_hidden=model_cfg.get("encoder_hidden", 512),
                 object_feature_dim=model_cfg.get("object_feature_dim", 256),
-                hand_dim=6,
+                encoder_layers=model_cfg.get("encoder_layers", 3),
+                hand_dim=model_cfg.get("hand_dim", 6),
+                denoiser_hidden=model_cfg.get("denoiser_hidden", 512),
+                denoiser_layers=model_cfg.get("denoiser_layers", 4),
             )
         
         model.load_state_dict(ckpt["model"])
@@ -187,6 +203,8 @@ class OmomoPipeline:
             model = Stage2MLPModel(
                 state_dim=state_dim,
                 cond_dim=cond_dim,
+                hidden_dim=model_cfg.get("mlp_hidden", 512),
+                num_layers=model_cfg.get("mlp_layers", 4),
             )
         
         model.load_state_dict(ckpt["model"])
@@ -340,6 +358,13 @@ class OmomoPipeline:
             truncated = True
         
         T_seq = object_centroid.shape[0]
+        object_conditioning = apply_object_conditioning_variant(
+            variant=self.object_conditioning_variant,
+            bps_encoding=bps_encoding,
+            object_centroid=object_centroid,
+        )
+        bps_encoding = object_conditioning["bps_encoding"]
+        object_centroid = object_conditioning["object_centroid"]
         
         # Prepare BPS
         bps = torch.from_numpy(bps_encoding).float().to(self.device)
@@ -429,6 +454,7 @@ class OmomoPipeline:
             "original_len": T_original,
             "partial": partial,
             "target_len": target_len,
+            "object_conditioning_variant": self.object_conditioning_variant,
         }
 
 
@@ -567,6 +593,9 @@ def main():
             obj_rot_mat_t = torch.from_numpy(obj_rot_mat).float()
             obj_rot_quat = mat_to_quat_xyzw(obj_rot_mat_t).numpy()  # (T, 4) xyzw
             output_data["object_rot"] = obj_rot_quat
+        for key in ("object_name", "mesh_file", "num_verts", "is_articulated"):
+            if key in data:
+                output_data[key] = data[key]
         
         # Copy local_body_pos and link_body_list from source data
         # (Required for visualization but cannot be computed without FK)

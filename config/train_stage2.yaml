@@ -21,9 +21,13 @@ dataset:
   preload: true    # Load data lazily to avoid OOM with large datasets
 
 model:
+  # MLP denoiser (used when train.architecture: "mlp")
+  mlp_hidden: 512
+  mlp_layers: 4
+
   # Transformer denoiser
-  d_model: 512
-  nhead: 8
+  d_model: 522
+  nhead: 9
   num_layers: 8  # Paper uses 4 self-attention blocks
   dim_feedforward: 512
   dropout: 0.1

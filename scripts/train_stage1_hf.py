@@ -17,6 +17,7 @@ Usage:
 import os
 import sys
 import types
+import argparse
 from datetime import datetime
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -55,10 +56,22 @@ from datasets.hf_motion_dataset import HFHandMotionDataset
 from models.stage1_hf_diffusion import Stage1HFHandDiffusion, Stage1HFHandDiffusionMLP
 from utils.diffusion import DiffusionConfig, DiffusionSchedule
 from utils.general import load_config, dump_config
+from utils.object_conditioning import (
+    describe_object_conditioning_variant,
+    normalize_object_conditioning_variant,
+)
 
 
 def main():
-    yml = load_config(os.path.join(PROJECT_ROOT, "config", "train_stage1_hf.yaml"))
+    parser = argparse.ArgumentParser(description="Stage 1 DDPM Training - HuggingFace Dataset")
+    parser.add_argument(
+        "--config_path",
+        type=str,
+        default=os.path.join(PROJECT_ROOT, "config", "train_stage1_hf.yaml"),
+    )
+    args = parser.parse_args()
+
+    yml = load_config(args.config_path)
 
     train_yml = yml["train"]
     dataset_yml = yml["dataset"]
@@ -88,21 +101,23 @@ def main():
     train_split = dataset_yml.get("train_split", 0.9)
     preload = dataset_yml.get("preload", True)
     require_object = dataset_yml.get("require_object", False)
+    object_conditioning_variant = normalize_object_conditioning_variant(
+        dataset_yml.get("object_conditioning_variant", "variant0")
+    )
+    dataset_yml["object_conditioning_variant"] = object_conditioning_variant
 
     # Model config
     object_feature_input_dim = model_yml.get("object_feature_input_dim", 15)
     encoder_hidden = model_yml["encoder_hidden"]
     encoder_layers = model_yml["encoder_layers"]
     object_feature_dim = model_yml["object_feature_dim"]
-    d_model = model_yml["d_model"]
-    nhead = model_yml["nhead"]
-    num_layers = model_yml["num_layers"]
-    dim_feedforward = model_yml["dim_feedforward"]
-    dropout = model_yml["dropout"]
 
     # Create experiment directory
     dtn = datetime.now().strftime("%Y%b%d_%H-%M-%S")
-    exp_name = f"stage1_hf_e{num_epochs}_b{batch_size}_lr{lr}_ts{timesteps}_w{window_size}_s{stride}_{architecture}_"
+    exp_name = (
+        f"stage1_hf_{object_conditioning_variant}_e{num_epochs}_b{batch_size}_lr{lr}_"
+        f"ts{timesteps}_w{window_size}_s{stride}_{architecture}_"
+    )
     log_path = os.path.join(save_dir, exp_name + dtn)
     figure_path = os.path.join(log_path, "figures")
     ckpt_path = os.path.join(log_path, "checkpoints")
@@ -117,6 +132,7 @@ def main():
     print(f"Experiment: {exp_name}")
     print(f"Logs: {log_path}")
     print(f"Generative model: DDPM (x0-prediction)")
+    print(f"Object conditioning: {describe_object_conditioning_variant(object_conditioning_variant)}")
 
     device = torch.device(device_str)
 
@@ -131,6 +147,7 @@ def main():
         train_split=train_split,
         preload=preload,
         require_object=require_object,
+        object_conditioning_variant=object_conditioning_variant,
     )
 
     print(f"  Windows: {len(dataset)}")
@@ -164,11 +181,11 @@ def main():
             object_feature_dim=object_feature_dim,
             encoder_layers=encoder_layers,
             hand_dim=hand_dim,
-            d_model=d_model,
-            nhead=nhead,
-            num_transformer_layers=num_layers,
-            dim_feedforward=dim_feedforward,
-            dropout=dropout,
+            d_model=model_yml["d_model"],
+            nhead=model_yml["nhead"],
+            num_transformer_layers=model_yml["num_layers"],
+            dim_feedforward=model_yml["dim_feedforward"],
+            dropout=model_yml["dropout"],
             max_len=window_size + 100,
         ).to(device)
     else:
@@ -178,8 +195,8 @@ def main():
             object_feature_dim=object_feature_dim,
             encoder_layers=encoder_layers,
             hand_dim=hand_dim,
-            denoiser_hidden=512,
-            denoiser_layers=4,
+            denoiser_hidden=model_yml.get("denoiser_hidden", 512),
+            denoiser_layers=model_yml.get("denoiser_layers", 4),
         ).to(device)
 
     num_params = sum(p.numel() for p in model.parameters())

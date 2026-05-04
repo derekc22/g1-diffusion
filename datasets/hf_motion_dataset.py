@@ -21,6 +21,10 @@ from torch.utils.data import Dataset
 
 from utils.rotation import quat_to_rot6d_xyzw
 from utils.normalization import compute_mean_std
+from utils.object_conditioning import (
+    apply_temporal_conditioning_variant,
+    normalize_object_conditioning_variant,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +63,7 @@ class HFHandMotionDataset(Dataset):
         hand_mean: Optional[torch.Tensor] = None,
         hand_std: Optional[torch.Tensor] = None,
         require_object: bool = False,
+        object_conditioning_variant: str = "variant0",
     ):
         super().__init__()
         self.root_dir = root_dir
@@ -67,6 +72,9 @@ class HFHandMotionDataset(Dataset):
         self.min_seq_len = min_seq_len
         self.preload = preload
         self.require_object = require_object
+        self.object_conditioning_variant = normalize_object_conditioning_variant(
+            object_conditioning_variant
+        )
 
         self.hand_mean = hand_mean
         self.hand_std = hand_std
@@ -224,7 +232,12 @@ class HFHandMotionDataset(Dataset):
         end = start + T
 
         hand_t = torch.from_numpy(data["hand_positions"][start:end]).float()
-        obj_t = torch.from_numpy(data["object_features"][start:end]).float()
+        object_features = data["object_features"][start:end]
+        object_features = apply_temporal_conditioning_variant(
+            object_features,
+            self.object_conditioning_variant,
+        )
+        obj_t = torch.from_numpy(object_features).float()
 
         # Normalize hands
         if self.hand_mean is not None:

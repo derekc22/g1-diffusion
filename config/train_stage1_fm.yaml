@@ -37,12 +37,20 @@ dataset:
   min_seq_len: 30
   train_split: 0.9
   preload: true
+  # variant0: exact object trajectory
+  # variant1: initial/final object frames only
+  # variant2: linear interpolation between initial/final object frames
+  object_conditioning_variant: "variant0"
 
 model:
   # Object Geometry Encoder (same as DDPM)
   encoder_hidden: 512
   encoder_layers: 3
   object_feature_dim: 256
+
+  # MLP velocity predictor (used when train.architecture: "mlp")
+  denoiser_hidden: 512
+  denoiser_layers: 4
 
   # Transformer velocity predictor (same architecture as DDPM denoiser)
   d_model: 256

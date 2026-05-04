@@ -35,6 +35,11 @@ from utils.diffusion import DiffusionConfig, DiffusionSchedule
 from utils.contact_constraints import apply_contact_constraints, ContactConstraintProcessor
 from utils.rotation import rot6d_to_quat_xyzw, mat_to_quat_xyzw
 from utils.general import load_config
+from utils.object_conditioning import (
+    apply_temporal_conditioning_variant,
+    describe_object_conditioning_variant,
+    normalize_object_conditioning_variant,
+)
 
 # ---------------------------------------------------------------------------
 # Compatibility shim for pickles created by NumPy >= 2.0
@@ -120,6 +125,10 @@ class HFPipeline:
 
         # Use minimum max_len for safety
         self.max_len = min(stage1_max_len, stage2_max_len)
+        self.object_conditioning_variant = normalize_object_conditioning_variant(
+            self.stage1_checkpoint_variant
+        )
+        print(f"Object conditioning: {describe_object_conditioning_variant(self.object_conditioning_variant)}")
 
         # Contact processor
         self.contact_processor = ContactConstraintProcessor(contact_threshold=contact_threshold)
@@ -133,6 +142,9 @@ class HFPipeline:
         arch = config.get("train", {}).get("architecture", "transformer")
         model_cfg = config.get("model", {})
         dataset_cfg = config.get("dataset", {})
+        self.stage1_checkpoint_variant = normalize_object_conditioning_variant(
+            dataset_cfg.get("object_conditioning_variant", "variant0")
+        )
 
         window_size = dataset_cfg.get("window_size", 120)
         max_len = model_cfg.get("max_len", window_size + 100)
@@ -164,6 +176,8 @@ class HFPipeline:
                 object_feature_dim=object_feature_dim,
                 encoder_layers=encoder_layers,
                 hand_dim=hand_dim,
+                denoiser_hidden=model_cfg.get("denoiser_hidden", 512),
+                denoiser_layers=model_cfg.get("denoiser_layers", 4),
             )
 
         model.load_state_dict(ckpt["model"])
@@ -223,6 +237,8 @@ class HFPipeline:
             model = Stage2MLPModel(
                 state_dim=state_dim,
                 cond_dim=cond_dim,
+                hidden_dim=model_cfg.get("mlp_hidden", 512),
+                num_layers=model_cfg.get("mlp_layers", 4),
             )
 
         model.load_state_dict(ckpt["model"])
@@ -344,6 +360,10 @@ class HFPipeline:
             truncated = True
 
         T_seq = object_features.shape[0]
+        object_features = apply_temporal_conditioning_variant(
+            object_features,
+            self.object_conditioning_variant,
+        )
 
         # Prepare object features tensor
         obj_feat = torch.from_numpy(object_features).float().unsqueeze(0).to(self.device)  # (1, T, 15)
@@ -424,6 +444,7 @@ class HFPipeline:
             "original_len": T_original,
             "partial": partial,
             "target_len": target_len,
+            "object_conditioning_variant": self.object_conditioning_variant,
         }
 
 
@@ -524,6 +545,7 @@ def main():
 
     print(f"\nProcessing {len(files)} files")
     print(f"Output directory: {output_dir}")
+    print(f"Object conditioning: {describe_object_conditioning_variant(pipeline.object_conditioning_variant)}")
 
     # Performance tracking
     total_time = 0.0
@@ -580,6 +602,9 @@ def main():
             obj_rot_mat_t = torch.from_numpy(obj_rot_mat).float()
             obj_rot_quat = mat_to_quat_xyzw(obj_rot_mat_t).numpy()
             output_data["object_rot"] = obj_rot_quat
+        for key in ("object_name", "mesh_file", "num_verts", "is_articulated"):
+            if key in data:
+                output_data[key] = data[key]
 
         # Compute local_body_pos via MuJoCo FK
         if mj_fk is not None:

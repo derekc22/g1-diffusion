@@ -1,0 +1,24 @@
+root_dir: "./data/hf_bps_preprocessed"
+
+sample:
+  stage1_ckpt_path: "/home/learning/Documents/g1-diffusion/logs/stage1_hf_bps_variant0_e10000_b128_lr0.0001_ts1000_w120_s10_transformer_2026Apr28_08-38-25/checkpoints/stage1_epoch_002599.pt"
+  stage2_ckpt_path: "/home/learning/Documents/g1-diffusion/logs/stage2_hf_e10000_b128_lr0.0001_ts1000_w120_s10_transformer_2026Apr28_12-24-20/checkpoints/stage2_hf_epoch_001299.pt"
+  device: "cuda"
+  num_samples: 10
+  seed: 42
+  apply_constraints: true
+  contact_threshold: 0.03
+  partial_motion_length: null
+
+dataset:
+  window_size: 120
+  stride: 10
+
+optimization:
+  precision: "fp16"
+  sampler: "ddim"
+  num_inference_steps: 5
+  torch_compile: true
+  ddim_eta: 0.0
+
+exp_name: "hf_bps_variant0_optimized"

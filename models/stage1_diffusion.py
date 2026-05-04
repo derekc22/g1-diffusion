@@ -417,7 +417,7 @@ class Stage1MLPDenoiser(nn.Module):
         
         # Timestep embedding
         input_dim = h.shape[-1]
-        t_emb = timestep_embedding(t, input_dim)  # (B, input_dim)
+        t_emb = timestep_embedding(t, input_dim, dtype=h.dtype)  # (B, input_dim)
         t_emb = self.time_mlp(t_emb)  # (B, input_dim)
         t_emb = t_emb.unsqueeze(1).expand(-1, T, -1)  # (B, T, input_dim)
         h = h + t_emb

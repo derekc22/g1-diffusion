@@ -54,6 +54,11 @@ from utils.contact_constraints import (
     compute_hand_jpe,
 )
 from utils.general import load_config
+from utils.object_conditioning import (
+    apply_object_conditioning_variant,
+    describe_object_conditioning_variant,
+    normalize_object_conditioning_variant,
+)
 
 # ---------------------------------------------------------------------------
 # Compatibility shim for pickles created by NumPy >= 2.0
@@ -114,8 +119,12 @@ def load_checkpoint(checkpoint_path: str, device: torch.device):
         model = Stage1HandDiffusionMLP(
             bps_dim=bps_dim,
             centroid_dim=centroid_dim,
+            encoder_hidden=model_cfg.get("encoder_hidden", 512),
             object_feature_dim=object_feature_dim,
+            encoder_layers=model_cfg.get("encoder_layers", 3),
             hand_dim=hand_dim,
+            denoiser_hidden=model_cfg.get("denoiser_hidden", 512),
+            denoiser_layers=model_cfg.get("denoiser_layers", 4),
         )
     
     model.load_state_dict(ckpt["model"])
@@ -273,6 +282,7 @@ def process_sequence_optimized(
     contact_threshold: float = 0.03,
     use_fast_sampler: bool = True,
     partial_motion_length: Optional[int] = None,
+    object_conditioning_variant: str = "variant0",
 ) -> Dict[str, np.ndarray]:
     """
     Process a single sequence with optimized sampling.
@@ -301,6 +311,14 @@ def process_sequence_optimized(
                 obj_rot = obj_rot[:partial_motion_length]
             partial = True
             target_len = partial_motion_length
+
+    object_conditioning = apply_object_conditioning_variant(
+        variant=object_conditioning_variant,
+        bps_encoding=bps_enc,
+        object_centroid=centroid,
+    )
+    bps_enc = object_conditioning["bps_encoding"]
+    centroid = object_conditioning["object_centroid"]
     
     # Prepare inputs
     bps = torch.from_numpy(bps_enc).float()
@@ -565,6 +583,9 @@ def main():
 
     # Load model
     model, num_timesteps, hand_mean, hand_std, config = load_checkpoint(ckpt_path, device)
+    object_conditioning_variant = normalize_object_conditioning_variant(
+        config.get("dataset", {}).get("object_conditioning_variant", "variant0")
+    )
 
     # Build inference config from YAML
     inf_config = build_inference_config_from_yaml(opt_yml)
@@ -574,6 +595,7 @@ def main():
     print(f"  Sampler: {inf_config.sampler.value}")
     print(f"  Steps: {inf_config.num_inference_steps if inf_config.sampler != SamplerType.DDPM else num_timesteps}")
     print(f"  torch.compile: {inf_config.use_torch_compile}")
+    print(f"  Object conditioning: {describe_object_conditioning_variant(object_conditioning_variant)}")
 
     # Run benchmark if requested
     if run_benchmark:
@@ -706,6 +728,7 @@ def main():
             contact_threshold=contact_threshold,
             use_fast_sampler=use_fast,
             partial_motion_length=partial_motion_length,
+            object_conditioning_variant=object_conditioning_variant,
         )
         
         if device.type == "cuda":
@@ -742,6 +765,7 @@ def main():
             "hands_rectified": result["hands_rectified"],
             "contact_metadata": result["contact_metadata"],
             "inference_time_ms": elapsed * 1000,
+            "object_conditioning_variant": object_conditioning_variant,
         }
         
         if "hand_positions" in data:

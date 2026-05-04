@@ -26,6 +26,10 @@ dataset:
   preload: true          # Preload all data into memory
 
 model:
+  # MLP denoiser (used when train.architecture: "mlp")
+  mlp_hidden: 512
+  mlp_layers: 4
+
   # Transformer denoiser (same architecture as original Stage 2)
   d_model: 512
   nhead: 8

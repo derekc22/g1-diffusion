@@ -21,6 +21,10 @@ import torch
 from torch.utils.data import Dataset
 
 from utils.normalization import compute_mean_std
+from utils.object_conditioning import (
+    apply_object_conditioning_variant,
+    normalize_object_conditioning_variant,
+)
 
 # ---------------------------------------------------------------------------
 # Compatibility shim for pickles created by NumPy >= 2.0 in envs with older NumPy
@@ -73,6 +77,7 @@ class HandMotionDataset(Dataset):
         hand_std: Optional[np.ndarray] = None,
         flatten_bps: bool = True,  # Whether to flatten BPS to (T, 3072)
         include_object_geometry: bool = False,  # Include object_verts/rotation (variable size, can't batch)
+        object_conditioning_variant: str = "variant0",
     ):
         super().__init__()
         self.root_dir = root_dir
@@ -82,6 +87,9 @@ class HandMotionDataset(Dataset):
         self.preload = preload
         self.flatten_bps = flatten_bps
         self.include_object_geometry = include_object_geometry
+        self.object_conditioning_variant = normalize_object_conditioning_variant(
+            object_conditioning_variant
+        )
         
         # Normalization stats (only for hand positions)
         self.hand_mean = hand_mean
@@ -198,6 +206,13 @@ class HandMotionDataset(Dataset):
         hand_positions = data["hand_positions"][start:end]  # (T, 6)
         bps_encoding = data["bps_encoding"][start:end]      # (T, 1024, 3)
         object_centroid = data["object_centroid"][start:end]  # (T, 3)
+        object_conditioning = apply_object_conditioning_variant(
+            variant=self.object_conditioning_variant,
+            bps_encoding=bps_encoding,
+            object_centroid=object_centroid,
+        )
+        bps_encoding = object_conditioning["bps_encoding"]
+        object_centroid = object_conditioning["object_centroid"]
         
         # Convert to tensors
         hand_t = torch.from_numpy(hand_positions).float()
@@ -294,6 +309,7 @@ class ObjectMotionDatasetWithHands(Dataset):
         # Separate normalization for hands and body
         hand_mean: Optional[np.ndarray] = None,
         hand_std: Optional[np.ndarray] = None,
+        object_conditioning_variant: str = "variant0",
     ):
         """Initialize dataset with same parameters as HandMotionDataset."""
         # Delegate to HandMotionDataset for most functionality
@@ -308,6 +324,7 @@ class ObjectMotionDatasetWithHands(Dataset):
             hand_mean=hand_mean,
             hand_std=hand_std,
             flatten_bps=True,
+            object_conditioning_variant=object_conditioning_variant,
         )
         
         # Expose normalization stats
@@ -316,6 +333,7 @@ class ObjectMotionDatasetWithHands(Dataset):
         self.windows = self._base.windows
         self.file_paths = self._base.file_paths
         self.num_files = self._base.num_files
+        self.object_conditioning_variant = self._base.object_conditioning_variant
     
     def __len__(self) -> int:
         return len(self._base)

@@ -8,8 +8,12 @@ set -e  # exit immediately on first error
 source /home/learning/miniconda3/etc/profile.d/conda.sh
 
 # Parent folder containing all sample subfolders
-ROBOT_MOTION_FOLDER_ALL="/home/learning/Documents/g1-diffusion/logs/stage2_hf_e10000_b128_lr0.0001_ts1000_w120_s10_transformer_2026Apr01_00-40-53/samples"
+# ROBOT_MOTION_FOLDER_ALL="/home/learning/Documents/g1-diffusion/logs/stage2_e10000_b128_lr0.0001_ts1000_w120_s10_transformer_2026Feb15_21-41-59/samples"
+# ROBOT_MOTION_FOLDER_ALL="/home/learning/Documents/g1-diffusion/logs/stage2_e10000_b128_lr0.0001_ts1000_w120_s10_mlp_2026Apr26_22-28-43/samples"
+# ROBOT_MOTION_FOLDER_ALL="/home/learning/Documents/g1-diffusion/logs/stage2_e10000_b128_lr0.0001_ts1000_w120_s10_transformer_2026Apr26_23-13-53/samples"
+ROBOT_MOTION_FOLDER_ALL="/home/learning/Documents/g1-diffusion/logs/stage2_hf_e10000_b128_lr0.0001_ts1000_w120_s10_transformer_2026Apr27_21-56-07/samples"
 SAVE_DIR="/home/learning/Documents/g1-diffusion/videos"
+REFERENCE_MOTION_FOLDER="/media/learning/DATA/export_smplx_retargeted_sub1_clothesstand"
 
 mkdir -p "$SAVE_DIR"
 
@@ -30,6 +34,7 @@ for sample_folder in "$ROBOT_MOTION_FOLDER_ALL"/*/; do
     python3 scripts/vis_robot_motion_dataset_w_object.py \
         --robot unitree_g1_with_object \
         --robot_motion_folder "$sample_folder" \
+        --reference_motion_folder "$REFERENCE_MOTION_FOLDER" \
         --record_video \
         --save_dir "$SAVE_DIR" \
         --auto

@@ -16,6 +16,7 @@ Usage:
 
 import os
 import sys
+import argparse
 from datetime import datetime
 
 # Ensure project root is on sys.path
@@ -37,10 +38,22 @@ from datasets.hand_motion_dataset import HandMotionDataset
 from models.stage1_flow_matching import Stage1HandFlowMatching, Stage1HandFlowMatchingMLP
 from utils.flow_matching import FlowMatchingConfig, FlowMatchingSchedule
 from utils.general import load_config, dump_config
+from utils.object_conditioning import (
+    describe_object_conditioning_variant,
+    normalize_object_conditioning_variant,
+)
 
 
 def main():
-    yml = load_config(os.path.join(PROJECT_ROOT, "config", "train_stage1_fm.yaml"))
+    parser = argparse.ArgumentParser(description="Stage 1 Flow Matching Training")
+    parser.add_argument(
+        "--config_path",
+        type=str,
+        default=os.path.join(PROJECT_ROOT, "config", "train_stage1_fm.yaml"),
+    )
+    args = parser.parse_args()
+
+    yml = load_config(args.config_path)
 
     train_yml = yml["train"]
     dataset_yml = yml["dataset"]
@@ -70,20 +83,22 @@ def main():
     min_seq_len = dataset_yml.get("min_seq_len", 30)
     train_split = dataset_yml.get("train_split", 0.9)
     preload = dataset_yml.get("preload", False)
+    object_conditioning_variant = normalize_object_conditioning_variant(
+        dataset_yml.get("object_conditioning_variant", "variant0")
+    )
+    dataset_yml["object_conditioning_variant"] = object_conditioning_variant
 
     # Model config
     encoder_hidden = model_yml["encoder_hidden"]
     encoder_layers = model_yml["encoder_layers"]
     object_feature_dim = model_yml["object_feature_dim"]
-    d_model = model_yml["d_model"]
-    nhead = model_yml["nhead"]
-    num_layers = model_yml["num_layers"]
-    dim_feedforward = model_yml["dim_feedforward"]
-    dropout = model_yml["dropout"]
 
     # Create experiment directory
     dtn = datetime.now().strftime("%Y%b%d_%H-%M-%S")
-    exp_name = f"stage1_fm_e{num_epochs}_b{batch_size}_lr{lr}_w{window_size}_s{stride}_{architecture}_"
+    exp_name = (
+        f"stage1_fm_{object_conditioning_variant}_e{num_epochs}_b{batch_size}_lr{lr}_"
+        f"w{window_size}_s{stride}_{architecture}_"
+    )
     log_path = os.path.join(save_dir, exp_name + dtn)
     figure_path = os.path.join(log_path, "figures")
     ckpt_path = os.path.join(log_path, "checkpoints")
@@ -95,6 +110,7 @@ def main():
     print(f"Experiment: {exp_name}")
     print(f"Logs: {log_path}")
     print(f"Generative model: Flow Matching (OT-CFM)")
+    print(f"Object conditioning: {describe_object_conditioning_variant(object_conditioning_variant)}")
 
     device = torch.device(device)
 
@@ -109,6 +125,7 @@ def main():
         train_split=train_split,
         preload=preload,
         flatten_bps=True,
+        object_conditioning_variant=object_conditioning_variant,
     )
 
     print(f"  Windows: {len(dataset)}")
@@ -145,11 +162,11 @@ def main():
             object_feature_dim=object_feature_dim,
             encoder_layers=encoder_layers,
             hand_dim=hand_dim,
-            d_model=d_model,
-            nhead=nhead,
-            num_transformer_layers=num_layers,
-            dim_feedforward=dim_feedforward,
-            dropout=dropout,
+            d_model=model_yml["d_model"],
+            nhead=model_yml["nhead"],
+            num_transformer_layers=model_yml["num_layers"],
+            dim_feedforward=model_yml["dim_feedforward"],
+            dropout=model_yml["dropout"],
             max_len=window_size + 100,
         ).to(device)
     else:
@@ -160,8 +177,8 @@ def main():
             object_feature_dim=object_feature_dim,
             encoder_layers=encoder_layers,
             hand_dim=hand_dim,
-            denoiser_hidden=512,
-            denoiser_layers=4,
+            denoiser_hidden=model_yml.get("denoiser_hidden", 512),
+            denoiser_layers=model_yml.get("denoiser_layers", 4),
         ).to(device)
 
     num_params = sum(p.numel() for p in model.parameters())

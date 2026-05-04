@@ -35,6 +35,11 @@ from utils.contact_constraints import (
     compute_hand_jpe,
 )
 from utils.general import load_config
+from utils.object_conditioning import (
+    apply_object_conditioning_variant,
+    describe_object_conditioning_variant,
+    normalize_object_conditioning_variant,
+)
 
 # ---------------------------------------------------------------------------
 # Compatibility shim for pickles created by NumPy >= 2.0
@@ -94,8 +99,12 @@ def load_checkpoint(checkpoint_path: str, device: torch.device):
         model = Stage1HandDiffusionMLP(
             bps_dim=bps_dim,
             centroid_dim=centroid_dim,
+            encoder_hidden=model_cfg.get("encoder_hidden", 512),
             object_feature_dim=object_feature_dim,
+            encoder_layers=model_cfg.get("encoder_layers", 3),
             hand_dim=hand_dim,
+            denoiser_hidden=model_cfg.get("denoiser_hidden", 512),
+            denoiser_layers=model_cfg.get("denoiser_layers", 4),
         )
     
     model.load_state_dict(ckpt["model"])
@@ -209,6 +218,7 @@ def process_sequence(
     apply_constraints: bool = True,
     contact_threshold: float = 0.03,
     partial_motion_length: Optional[int] = None,
+    object_conditioning_variant: str = "variant0",
 ) -> Dict[str, np.ndarray]:
     """
     Process a single sequence: sample hands and apply contact constraints.
@@ -247,6 +257,14 @@ def process_sequence(
                 obj_rot = obj_rot[:partial_motion_length]
             partial = True
             target_len = partial_motion_length
+
+    object_conditioning = apply_object_conditioning_variant(
+        variant=object_conditioning_variant,
+        bps_encoding=bps_enc,
+        object_centroid=centroid,
+    )
+    bps_enc = object_conditioning["bps_encoding"]
+    centroid = object_conditioning["object_centroid"]
     
     # Prepare inputs
     bps = torch.from_numpy(bps_enc).float().to(device)
@@ -341,14 +359,16 @@ def main():
     device = torch.device(device)
     torch.manual_seed(seed)
 
+    model, schedule, hand_mean, hand_std, config = load_checkpoint(ckpt_path, device)
+    object_conditioning_variant = normalize_object_conditioning_variant(
+        config.get("dataset", {}).get("object_conditioning_variant", "variant0")
+    )
+
     # Save config to samples directory for reproducibility
     import yaml
     config_path = os.path.join(output_dir, "config.yml")
     with open(config_path, "w") as f:
         yaml.dump(yml, f, default_flow_style=False)
-
-    # Load model
-    model, schedule, hand_mean, hand_std, config = load_checkpoint(ckpt_path, device)
 
     # Find input files
     files = sorted(glob.glob(os.path.join(root_dir, "*.pkl")))
@@ -357,6 +377,7 @@ def main():
 
     print(f"Processing {len(files)} files")
     print(f"Output directory: {output_dir}")
+    print(f"Object conditioning: {describe_object_conditioning_variant(object_conditioning_variant)}")
 
     # Metrics accumulators
     all_metrics = []
@@ -387,6 +408,7 @@ def main():
             apply_constraints=apply_constraints,
             contact_threshold=contact_threshold,
             partial_motion_length=partial_motion_length,
+            object_conditioning_variant=object_conditioning_variant,
         )
         
         elapsed = time.perf_counter() - start_time
@@ -422,6 +444,7 @@ def main():
             "hands_raw": result["hands_raw"],
             "hands_rectified": result["hands_rectified"],
             "contact_metadata": result["contact_metadata"],
+            "object_conditioning_variant": object_conditioning_variant,
         }
 
         # Optionally include GT for comparison

@@ -23,6 +23,13 @@ from .flow_matching import (
     get_ode_solver,
     flow_matching_timestep_embedding,
 )
+from .object_conditioning import (
+    OBJECT_CONDITIONING_VARIANTS,
+    apply_object_conditioning_variant,
+    apply_temporal_conditioning_variant,
+    describe_object_conditioning_variant,
+    normalize_object_conditioning_variant,
+)
 
 __all__ = [
     # Inference optimization
@@ -45,4 +52,10 @@ __all__ = [
     "rk4_solve",
     "get_ode_solver",
     "flow_matching_timestep_embedding",
+    # Object conditioning variants
+    "OBJECT_CONDITIONING_VARIANTS",
+    "apply_object_conditioning_variant",
+    "apply_temporal_conditioning_variant",
+    "describe_object_conditioning_variant",
+    "normalize_object_conditioning_variant",
 ]
