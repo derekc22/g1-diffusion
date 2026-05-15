@@ -25,6 +25,7 @@ from utils.object_conditioning import (
     apply_object_conditioning_variant,
     normalize_object_conditioning_variant,
 )
+from utils.object_sampling import object_name_from_data
 
 # ---------------------------------------------------------------------------
 # Compatibility shim for pickles created by NumPy >= 2.0 in envs with older NumPy
@@ -43,6 +44,48 @@ if "numpy._core.numerictypes" not in sys.modules:
 if "numpy._core.umath" not in sys.modules:
     sys.modules["numpy._core.umath"] = np.core.umath
 # ---------------------------------------------------------------------------
+
+
+def compute_contact_annotations(
+    hand_positions: np.ndarray,
+    object_verts: Optional[np.ndarray],
+    contact_threshold: float,
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
+    if object_verts is None:
+        return None, None, None
+
+    T = hand_positions.shape[0]
+    if object_verts.ndim == 2:
+        verts_by_frame = None
+        static_verts = np.asarray(object_verts, dtype=np.float32)
+        if static_verts.shape[0] == 0:
+            return None, None, None
+    elif object_verts.ndim == 3 and object_verts.shape[0] > 0:
+        verts_by_frame = object_verts
+        static_verts = None
+    else:
+        return None, None, None
+
+    points = np.zeros((T, 6), dtype=np.float32)
+    offsets = np.zeros((T, 6), dtype=np.float32)
+    mask = np.zeros((T, 2), dtype=np.float32)
+
+    for t in range(T):
+        if verts_by_frame is None:
+            verts_t = static_verts
+        else:
+            verts_t = np.asarray(verts_by_frame[min(t, verts_by_frame.shape[0] - 1)], dtype=np.float32)
+        for hand_idx in range(2):
+            start = hand_idx * 3
+            hand = hand_positions[t, start:start + 3]
+            dists = np.linalg.norm(verts_t - hand[None, :], axis=1)
+            nearest_idx = int(np.argmin(dists))
+            nearest = verts_t[nearest_idx]
+            points[t, start:start + 3] = nearest
+            offsets[t, start:start + 3] = hand - nearest
+            mask[t, hand_idx] = 1.0 if float(dists[nearest_idx]) < contact_threshold else 0.0
+
+    return points, offsets, mask
 
 
 class HandMotionDataset(Dataset):
@@ -77,6 +120,8 @@ class HandMotionDataset(Dataset):
         hand_std: Optional[np.ndarray] = None,
         flatten_bps: bool = True,  # Whether to flatten BPS to (T, 3072)
         include_object_geometry: bool = False,  # Include object_verts/rotation (variable size, can't batch)
+        include_contact_data: bool = False,
+        contact_threshold: float = 0.05,
         object_conditioning_variant: str = "variant0",
     ):
         super().__init__()
@@ -87,6 +132,8 @@ class HandMotionDataset(Dataset):
         self.preload = preload
         self.flatten_bps = flatten_bps
         self.include_object_geometry = include_object_geometry
+        self.include_contact_data = include_contact_data
+        self.contact_threshold = contact_threshold
         self.object_conditioning_variant = normalize_object_conditioning_variant(
             object_conditioning_variant
         )
@@ -114,8 +161,13 @@ class HandMotionDataset(Dataset):
         self.windows: List[Tuple[int, int]] = []
         self._file_cache: Dict[int, Dict[str, Any]] = {}
         
+        self.file_object_names: List[str] = []
+
         for fi, path in enumerate(self.file_paths):
             data = self._load_file(fi, path)
+            self.file_object_names.append(
+                data.get("object_name", "unknown") if data is not None else "unknown"
+            )
             if data is None:
                 continue
             T = data["hand_positions"].shape[0]
@@ -166,19 +218,47 @@ class HandMotionDataset(Dataset):
             print(f"Warning: Invalid hand_positions shape {hand_positions.shape} in {path}")
             return None
         
+        seq_name = data.get("seq_name", os.path.splitext(os.path.basename(path))[0])
         data_proc = {
             "hand_positions": hand_positions,
             "bps_encoding": bps_encoding,
             "object_centroid": object_centroid,
-            "seq_name": data.get("seq_name", os.path.splitext(os.path.basename(path))[0]),
+            "seq_name": seq_name,
+            "object_name": object_name_from_data(data, path),
             "fps": float(data.get("fps", 30.0)),
         }
         
-        # Only load object geometry if explicitly requested (for contact constraints)
-        # These are large and have variable sizes, so skip during training
+        object_verts = data.get("object_verts")
+        object_rotation = data.get("object_rotation")
+        if self.include_contact_data and object_verts is not None:
+            contact_points, contact_offsets, contact_mask = compute_contact_annotations(
+                hand_positions,
+                np.asarray(object_verts, dtype=np.float32),
+                self.contact_threshold,
+            )
+        else:
+            contact_points = contact_offsets = contact_mask = None
+
+        if self.include_contact_data and contact_points is not None:
+            data_proc["contact_points"] = contact_points
+            data_proc["contact_offsets"] = contact_offsets
+            data_proc["contact_mask"] = contact_mask
+            data_proc["contact_distance_mask"] = contact_mask
+        elif self.include_contact_data:
+            zeros = np.zeros_like(hand_positions, dtype=np.float32)
+            data_proc["contact_points"] = zeros
+            data_proc["contact_offsets"] = zeros
+            data_proc["contact_mask"] = np.zeros((hand_positions.shape[0], 2), dtype=np.float32)
+            data_proc["contact_distance_mask"] = np.zeros((hand_positions.shape[0], 2), dtype=np.float32)
+        else:
+            data_proc["contact_points"] = None
+            data_proc["contact_offsets"] = None
+            data_proc["contact_mask"] = None
+            data_proc["contact_distance_mask"] = None
+
+        # Full object geometry is large and variable-size, so only keep it when
+        # a sampling/eval caller explicitly asks for it.
         if self.include_object_geometry:
-            object_verts = data.get("object_verts")
-            object_rotation = data.get("object_rotation")
             data_proc["object_verts"] = np.asarray(object_verts, dtype=np.float32) if object_verts is not None else None
             data_proc["object_rotation"] = np.asarray(object_rotation, dtype=np.float32) if object_rotation is not None else None
         else:
@@ -236,6 +316,7 @@ class HandMotionDataset(Dataset):
             "bps_encoding": bps_t,
             "object_centroid": centroid_t,
             "seq_name": data["seq_name"],
+            "object_name": data["object_name"],
             "fps": data["fps"],
             "file_idx": file_idx,
             "start": start,
@@ -248,6 +329,12 @@ class HandMotionDataset(Dataset):
                 result["object_verts"] = torch.from_numpy(data["object_verts"][start:end]).float()
             if data["object_rotation"] is not None:
                 result["object_rotation"] = torch.from_numpy(data["object_rotation"][start:end]).float()
+
+        if self.include_contact_data and data["contact_points"] is not None:
+            result["contact_points"] = torch.from_numpy(data["contact_points"][start:end]).float()
+            result["contact_offsets"] = torch.from_numpy(data["contact_offsets"][start:end]).float()
+            result["contact_mask"] = torch.from_numpy(data["contact_mask"][start:end]).float()
+            result["contact_distance_mask"] = torch.from_numpy(data["contact_distance_mask"][start:end]).float()
         
         return result
     
@@ -258,6 +345,12 @@ class HandMotionDataset(Dataset):
     def get_unnormalized(self, idx: int) -> Dict[str, Any]:
         """Get unnormalized sample (for visualization/evaluation)."""
         return self._get_window(idx, normalized=False)
+
+    def get_window_object_names(self) -> List[str]:
+        return [
+            self._load_file(file_idx, self.file_paths[file_idx]).get("object_name", "unknown")
+            for file_idx, _ in self.windows
+        ]
     
     def denormalize_hands(self, hand_positions: torch.Tensor) -> torch.Tensor:
         """

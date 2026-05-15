@@ -1,0 +1,29 @@
+root_dir: "./data/hf_bps_preprocessed"
+
+sample:
+  stage1_ckpt_path: "/home/learning/Documents/g1-diffusion/logs/agentic_i001_stage1_hf_bps_surface_variant0_e10000_b128_lr5e-05_ts1000_w120_s10_transformer_2026May04_22-58-00/checkpoints/stage1_epoch_000074.pt"
+  stage2_ckpt_path: "/home/learning/Documents/g1-diffusion/logs/stage2_hf_e10000_b64_lr1e-05_ts1000_w120_s10_transformer_2026May07_16-44-32/checkpoints/stage2_hf_epoch_000020.pt"
+  device: "cuda"
+  num_samples: 10
+  seed: 42
+  apply_constraints: true
+  contact_threshold: 0.03
+  body_smooth_strength: 0.4
+  body_smooth_window: 7
+  body_smooth_iterations: 1
+  robot_contact_correction: true
+  robot_contact_activation_threshold: 0.16
+  robot_contact_max_translation: 0.50
+  robot_contact_smooth_strength: 0.25
+  robot_contact_smooth_window: 9
+  robot_contact_smooth_iterations: 2
+  partial_motion_length: null
+
+optimization:
+  precision: "fp16"
+  sampler: "ddim"
+  num_inference_steps: 7
+  torch_compile: true
+  ddim_eta: 0.0
+
+exp_name: "agentic_i013_robotfk_e020_rootcorr050_ddim7"

@@ -560,7 +560,6 @@ def main():
     yml = load_config(args.config_path)
     
     sample_yml = yml["sample"]
-    dataset_yml = yml["dataset"]
     opt_yml = yml.get("optimization", {})
 
     root_dir = yml["root_dir"]
@@ -633,15 +632,11 @@ def main():
     exp_name = yml.get("exp_name", "")
     suffix = f"_{exp_name}" if exp_name else ""
     
-    # Get dataset config for folder naming
-    window_size = dataset_yml.get("window_size", 120)
-    stride = dataset_yml.get("stride", 10)
-
     ckpt_parts = ckpt_path.split("/")
     if "logs" in ckpt_parts and "checkpoints" in ckpt_parts:
         logs_idx = ckpt_parts.index("logs")
         log_id = ckpt_parts[logs_idx + 1]
-        sample_folder = f"ts{num_timesteps}_w{window_size}_s{stride}_{timestamp}{suffix}"
+        sample_folder = f"ts{num_timesteps}_{timestamp}{suffix}"
         output_dir = os.path.join("logs", log_id, "samples", sample_folder)
     else:
         output_dir = f"./out/stage1_{timestamp}{suffix}"

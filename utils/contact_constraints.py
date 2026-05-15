@@ -20,6 +20,56 @@ import numpy as np
 import torch
 
 
+def temporal_smooth_np(
+    sequence: np.ndarray,
+    strength: float = 0.25,
+    window: int = 5,
+    iterations: int = 1,
+    preserve_ends: bool = True,
+) -> np.ndarray:
+    if strength <= 0.0 or iterations <= 0 or window <= 1 or sequence.shape[0] < 3:
+        return sequence
+    window = max(3, int(window))
+    if window % 2 == 0:
+        window += 1
+    radius = window // 2
+    out = sequence.astype(np.float32, copy=True)
+    kernel = np.ones(window, dtype=np.float32) / float(window)
+    original_first = out[0].copy()
+    original_last = out[-1].copy()
+
+    for _ in range(iterations):
+        padded = np.pad(out, ((radius, radius), (0, 0)), mode="edge")
+        smoothed = np.empty_like(out)
+        for dim in range(out.shape[1]):
+            smoothed[:, dim] = np.convolve(padded[:, dim], kernel, mode="valid")
+        out = (1.0 - strength) * out + strength * smoothed
+        if preserve_ends:
+            out[0] = original_first
+            out[-1] = original_last
+    return out.astype(sequence.dtype, copy=False)
+
+
+def limit_contact_correction_np(
+    original: np.ndarray,
+    corrected: np.ndarray,
+    max_correction: Optional[float],
+) -> np.ndarray:
+    if max_correction is None or max_correction <= 0.0:
+        return corrected
+
+    out = original.astype(np.float32, copy=True)
+    corrected = corrected.astype(np.float32, copy=False)
+    for hand_idx in range(2):
+        start = hand_idx * 3
+        end = start + 3
+        delta = corrected[:, start:end] - original[:, start:end]
+        norm = np.linalg.norm(delta, axis=-1, keepdims=True)
+        scale = np.minimum(1.0, max_correction / np.maximum(norm, 1e-8))
+        out[:, start:end] = original[:, start:end] + delta * scale
+    return out.astype(corrected.dtype, copy=False)
+
+
 def find_nearest_vertex(
     hand_pos: np.ndarray,
     object_verts: np.ndarray,
@@ -44,6 +94,7 @@ def apply_contact_constraints_single_hand(
     object_verts: np.ndarray,
     object_rotations: np.ndarray,
     contact_threshold: float = 0.03,
+    max_contact_offset: Optional[float] = None,
 ) -> np.ndarray:
     """
     Apply contact constraints to a single hand's trajectory.
@@ -53,6 +104,7 @@ def apply_contact_constraints_single_hand(
         object_verts: (T, K, 3) object mesh vertices over time
         object_rotations: (T, 3, 3) object rotation matrices over time
         contact_threshold: threshold for contact detection (meters), paper uses 0.03
+        max_contact_offset: clamp retained hand-to-surface offset after contact
     
     Returns:
         (T, 3) rectified hand positions
@@ -80,6 +132,10 @@ def apply_contact_constraints_single_hand(
     V_i_k = object_verts[k, nearest_vertex_idx]  # (3,)
     H_k = hand_positions[k]  # (3,)
     p = H_k - V_i_k  # offset vector (3,)
+    if max_contact_offset is not None and max_contact_offset >= 0.0:
+        p_norm = float(np.linalg.norm(p))
+        if p_norm > max_contact_offset and p_norm > 1e-8:
+            p = p / p_norm * max_contact_offset
     
     R_k = object_rotations[k]  # (3, 3)
     R_k_inv = np.linalg.inv(R_k)
@@ -101,6 +157,7 @@ def apply_contact_constraints(
     object_verts: np.ndarray,
     object_rotations: np.ndarray,
     contact_threshold: float = 0.03,
+    max_contact_offset: Optional[float] = None,
 ) -> np.ndarray:
     """
     Apply contact constraints to both hands.
@@ -110,6 +167,7 @@ def apply_contact_constraints(
         object_verts: (T, K, 3) object mesh vertices
         object_rotations: (T, 3, 3) object rotation matrices
         contact_threshold: threshold for contact detection (meters)
+        max_contact_offset: clamp retained hand-to-surface offset after contact
     
     Returns:
         (T, 6) rectified hand positions
@@ -120,14 +178,68 @@ def apply_contact_constraints(
     
     # Apply constraints separately
     left_rectified = apply_contact_constraints_single_hand(
-        left_hand, object_verts, object_rotations, contact_threshold
+        left_hand, object_verts, object_rotations, contact_threshold, max_contact_offset
     )
     right_rectified = apply_contact_constraints_single_hand(
-        right_hand, object_verts, object_rotations, contact_threshold
+        right_hand, object_verts, object_rotations, contact_threshold, max_contact_offset
     )
     
     # Combine
     return np.concatenate([left_rectified, right_rectified], axis=-1)
+
+
+def apply_labeled_contact_constraints(
+    hand_positions: np.ndarray,
+    object_verts: np.ndarray,
+    object_rotations: np.ndarray,
+    contact_labels: np.ndarray,
+    max_contact_offset: Optional[float] = 0.02,
+) -> np.ndarray:
+    labels = np.asarray(contact_labels).reshape(-1)[: hand_positions.shape[0]] > 0
+    if not np.any(labels):
+        return hand_positions.copy()
+
+    T = hand_positions.shape[0]
+    rectified = hand_positions.copy()
+    t = 0
+
+    while t < T:
+        if not labels[t]:
+            t += 1
+            continue
+
+        start = t
+        while t < T and labels[t]:
+            t += 1
+        end = t
+
+        left_idx, left_dist, left_vertex = find_nearest_vertex(
+            rectified[start, :3], object_verts[start]
+        )
+        right_idx, right_dist, right_vertex = find_nearest_vertex(
+            rectified[start, 3:], object_verts[start]
+        )
+        if right_dist < left_dist:
+            hand_slice = slice(3, 6)
+            nearest_idx = right_idx
+            nearest = right_vertex
+        else:
+            hand_slice = slice(0, 3)
+            nearest_idx = left_idx
+            nearest = left_vertex
+
+        p = rectified[start, hand_slice] - nearest
+        if max_contact_offset is not None and max_contact_offset >= 0.0:
+            p_norm = float(np.linalg.norm(p))
+            if p_norm > max_contact_offset and p_norm > 1e-8:
+                p = p / p_norm * max_contact_offset
+
+        R_start_inv = np.linalg.inv(object_rotations[start])
+        for frame in range(start, end):
+            rotated_offset = object_rotations[frame] @ R_start_inv @ p
+            rectified[frame, hand_slice] = object_verts[frame, nearest_idx] + rotated_offset
+
+    return rectified
 
 
 def apply_contact_constraints_batch(
@@ -135,6 +247,11 @@ def apply_contact_constraints_batch(
     object_verts: torch.Tensor,
     object_rotations: torch.Tensor,
     contact_threshold: float = 0.03,
+    smooth_strength: float = 0.25,
+    smooth_window: int = 5,
+    smooth_iterations: int = 1,
+    max_contact_offset: Optional[float] = 0.02,
+    max_contact_correction: Optional[float] = 0.06,
 ) -> torch.Tensor:
     """
     Batch version of contact constraints for inference.
@@ -144,6 +261,11 @@ def apply_contact_constraints_batch(
         object_verts: (B, T, K, 3) object vertices
         object_rotations: (B, T, 3, 3) object rotations
         contact_threshold: contact detection threshold
+        smooth_strength: temporal smoothing blend before contact constraints
+        smooth_window: odd moving-average window for smoothing
+        smooth_iterations: smoothing iterations
+        max_contact_offset: clamp retained hand-to-surface offset after contact
+        max_contact_correction: maximum per-frame correction applied to each hand
     
     Returns:
         (B, T, 6) rectified hand positions
@@ -158,9 +280,16 @@ def apply_contact_constraints_batch(
     
     results = []
     for b in range(B):
-        rectified = apply_contact_constraints(
-            hands_np[b], verts_np[b], rots_np[b], contact_threshold
+        hands_b = temporal_smooth_np(
+            hands_np[b],
+            strength=smooth_strength,
+            window=smooth_window,
+            iterations=smooth_iterations,
         )
+        rectified = apply_contact_constraints(
+            hands_b, verts_np[b], rots_np[b], contact_threshold, max_contact_offset
+        )
+        rectified = limit_contact_correction_np(hands_b, rectified, max_contact_correction)
         results.append(rectified)
     
     results_np = np.stack(results, axis=0)
@@ -303,15 +432,36 @@ class ContactConstraintProcessor:
         self,
         contact_threshold: float = 0.03,
         two_hand_threshold: float = 0.03,  # Both hands within this distance = two-handed
+        contact_search_threshold: Optional[float] = None,
+        max_contact_offset: Optional[float] = 0.02,
+        max_contact_correction: Optional[float] = 0.06,
+        smooth_strength: float = 0.25,
+        smooth_window: int = 5,
+        smooth_iterations: int = 1,
+        fallback_contact_search_threshold: Optional[float] = None,
+        fallback_max_contact_correction: Optional[float] = None,
     ):
         self.contact_threshold = contact_threshold
         self.two_hand_threshold = two_hand_threshold
+        self.contact_search_threshold = (
+            max(contact_threshold, 0.08)
+            if contact_search_threshold is None
+            else contact_search_threshold
+        )
+        self.max_contact_offset = max_contact_offset
+        self.max_contact_correction = max_contact_correction
+        self.smooth_strength = smooth_strength
+        self.smooth_window = smooth_window
+        self.smooth_iterations = smooth_iterations
+        self.fallback_contact_search_threshold = fallback_contact_search_threshold
+        self.fallback_max_contact_correction = fallback_max_contact_correction
     
     def process(
         self,
         hand_positions: np.ndarray,
         object_verts: np.ndarray,
         object_rotations: np.ndarray,
+        contact_labels: Optional[np.ndarray] = None,
     ) -> Tuple[np.ndarray, dict]:
         """
         Apply contact constraints and return metadata.
@@ -320,19 +470,104 @@ class ContactConstraintProcessor:
             hand_positions: (T, 6) predicted hand positions
             object_verts: (T, K, 3) object vertices
             object_rotations: (T, 3, 3) object rotations
+            contact_labels: optional (T,) contact intervals from data
         
         Returns:
             rectified_hands: (T, 6) contact-constrained positions
             metadata: dict with contact info
         """
-        rectified = apply_contact_constraints(
-            hand_positions, object_verts, object_rotations, self.contact_threshold
+        smoothed_hands = temporal_smooth_np(
+            hand_positions,
+            strength=self.smooth_strength,
+            window=self.smooth_window,
+            iterations=self.smooth_iterations,
+        )
+        if contact_labels is not None:
+            rectified = apply_labeled_contact_constraints(
+                smoothed_hands,
+                object_verts,
+                object_rotations,
+                contact_labels,
+                self.max_contact_offset,
+            )
+        else:
+            rectified = apply_contact_constraints(
+                smoothed_hands,
+                object_verts,
+                object_rotations,
+                self.contact_search_threshold,
+                self.max_contact_offset,
+            )
+        rectified = limit_contact_correction_np(
+            smoothed_hands,
+            rectified,
+            self.max_contact_correction,
         )
         
         # Determine manipulation mode
         left_contact, right_contact = detect_contact_frames(
             rectified, object_verts, self.two_hand_threshold
         )
+        used_fallback = False
+
+        if (
+            self.fallback_contact_search_threshold is not None
+            and self.fallback_contact_search_threshold > self.contact_search_threshold
+            and not np.any(left_contact | right_contact)
+        ):
+            use_labeled_fallback = False
+            if contact_labels is not None:
+                labels = np.asarray(contact_labels).reshape(-1)[: smoothed_hands.shape[0]] > 0
+                if np.any(labels):
+                    min_labeled_dist = np.inf
+                    for frame in np.where(labels)[0]:
+                        left_dist = np.linalg.norm(
+                            object_verts[frame] - smoothed_hands[frame, :3], axis=1
+                        ).min()
+                        right_dist = np.linalg.norm(
+                            object_verts[frame] - smoothed_hands[frame, 3:], axis=1
+                        ).min()
+                        min_labeled_dist = min(min_labeled_dist, float(left_dist), float(right_dist))
+                    use_labeled_fallback = min_labeled_dist <= self.fallback_contact_search_threshold
+
+            if use_labeled_fallback:
+                fallback = apply_labeled_contact_constraints(
+                    smoothed_hands,
+                    object_verts,
+                    object_rotations,
+                    contact_labels,
+                    self.max_contact_offset,
+                )
+            else:
+                fallback = apply_contact_constraints(
+                    smoothed_hands,
+                    object_verts,
+                    object_rotations,
+                    self.fallback_contact_search_threshold,
+                    self.max_contact_offset,
+                )
+            fallback = limit_contact_correction_np(
+                smoothed_hands,
+                fallback,
+                (
+                    self.fallback_max_contact_correction
+                    if self.fallback_max_contact_correction is not None
+                    else self.max_contact_correction
+                ),
+            )
+            fallback_left, fallback_right = detect_contact_frames(
+                fallback, object_verts, self.two_hand_threshold
+            )
+            if np.any(fallback_left | fallback_right):
+                rectified = fallback
+                left_contact = fallback_left
+                right_contact = fallback_right
+                used_fallback = True
+                used_labeled_fallback = use_labeled_fallback
+            else:
+                used_labeled_fallback = False
+        else:
+            used_labeled_fallback = False
         
         is_two_handed = np.any(left_contact) and np.any(right_contact)
         
@@ -342,6 +577,16 @@ class ContactConstraintProcessor:
             "is_two_handed": is_two_handed,
             "left_first_contact": np.argmax(left_contact) if np.any(left_contact) else -1,
             "right_first_contact": np.argmax(right_contact) if np.any(right_contact) else -1,
+            "used_contact_labels": contact_labels is not None,
+            "contact_search_threshold": self.contact_search_threshold,
+            "max_contact_offset": self.max_contact_offset,
+            "max_contact_correction": self.max_contact_correction,
+            "used_fallback": used_fallback,
+            "used_labeled_fallback": used_labeled_fallback,
+            "fallback_contact_search_threshold": self.fallback_contact_search_threshold,
+            "fallback_max_contact_correction": self.fallback_max_contact_correction,
+            "smoothing_strength": self.smooth_strength,
+            "smoothing_window": self.smooth_window,
         }
         
         return rectified, metadata

@@ -60,6 +60,14 @@ from utils.object_conditioning import (
     describe_object_conditioning_variant,
     normalize_object_conditioning_variant,
 )
+from utils.object_sampling import build_balanced_sampler, format_label_counts
+from utils.motion_losses import (
+    contact_anchor_loss,
+    denormalize,
+    format_metrics,
+    loss_config,
+    temporal_reconstruction_loss,
+)
 
 
 def main():
@@ -76,6 +84,7 @@ def main():
     train_yml = yml["train"]
     dataset_yml = yml["dataset"]
     model_yml = yml["model"]
+    loss_cfg = loss_config(yml, "stage1")
 
     root_dir = yml["root_dir"]
     # Resolve relative paths against project root
@@ -147,6 +156,12 @@ def main():
         train_split=train_split,
         preload=preload,
         require_object=require_object,
+        include_contact_data=(
+            loss_cfg["contact_weight"] > 0.0
+            or loss_cfg["contact_offset_weight"] > 0.0
+            or loss_cfg["contact_distance_weight"] > 0.0
+        ),
+        contact_threshold=loss_cfg["contact_margin"],
         object_conditioning_variant=object_conditioning_variant,
     )
 
@@ -154,10 +169,22 @@ def main():
     print(f"  Files: {dataset.num_files}")
     print(f"  Hand mean shape: {dataset.hand_mean.shape}")
 
+    sampler = None
+    if dataset_yml.get("balance_by_object", False):
+        object_labels = dataset.get_window_object_names()
+        sampler = build_balanced_sampler(
+            object_labels,
+            power=float(dataset_yml.get("object_balance_power", 1.0)),
+            min_count=int(dataset_yml.get("object_balance_min_count", 1)),
+            seed=train_yml.get("seed"),
+        )
+        print(f"  Object-balanced sampler: {format_label_counts(object_labels)}")
+
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=sampler is None,
+        sampler=sampler,
         drop_last=True,
         num_workers=4,
         pin_memory=True,
@@ -243,7 +270,20 @@ def main():
             hand_pred = model(hand_noisy, t, obj_feat)
 
             # Loss
-            loss = F.mse_loss(hand_pred, hand_pos)
+            base_loss = F.mse_loss(hand_pred, hand_pos)
+            hand_pred_phys = denormalize(hand_pred, dataset.hand_mean, dataset.hand_std)
+            hand_pos_phys = denormalize(hand_pos, dataset.hand_mean, dataset.hand_std)
+            temporal_loss, temporal_metrics = temporal_reconstruction_loss(
+                hand_pred_phys,
+                hand_pos_phys,
+                loss_cfg,
+            )
+            contact_loss, contact_metrics = contact_anchor_loss(
+                hand_pred_phys,
+                batch,
+                loss_cfg,
+            )
+            loss = loss_cfg["base_weight"] * base_loss + temporal_loss + contact_loss
 
             # Backprop
             optimizer.zero_grad()
@@ -254,7 +294,15 @@ def main():
             num_batches += 1
 
             if global_step % 50 == 0:
-                print(f"Epoch {epoch} Step {step} (global {global_step}): loss={loss.item():.6f}")
+                metrics = {
+                    "base": float(base_loss.detach().cpu()),
+                    **temporal_metrics,
+                    **contact_metrics,
+                }
+                print(
+                    f"Epoch {epoch} Step {step} (global {global_step}): "
+                    f"loss={loss.item():.6f} {format_metrics(metrics)}"
+                )
 
             global_step += 1
 

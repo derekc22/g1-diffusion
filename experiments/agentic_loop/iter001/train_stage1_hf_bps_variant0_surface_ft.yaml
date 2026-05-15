@@ -1,0 +1,46 @@
+root_dir: "./data/hf_bps_preprocessed"
+
+train:
+  batch_size: 128
+  num_epochs: 10000
+  lr: 5e-5
+  timesteps: 1000
+  device: "cuda:0"
+  architecture: "transformer"
+  save_dir: "./logs"
+  save_every: 1
+  exp_prefix: "agentic_i001_stage1_hf_bps_surface"
+  init_ckpt_path: "/home/learning/Documents/g1-diffusion/logs/stage1_hf_bps_variant0_e10000_b128_lr0.0001_ts1000_w120_s10_transformer_2026May04_16-55-18/checkpoints/stage1_epoch_001999.pt"
+  resume_optimizer: false
+  max_train_seconds: 3000
+
+dataset:
+  window_size: 120
+  stride: 10
+  min_seq_len: 30
+  train_split: 0.9
+  preload: true
+  object_conditioning_variant: "variant0"
+
+model:
+  encoder_hidden: 512
+  encoder_layers: 3
+  object_feature_dim: 256
+  denoiser_hidden: 512
+  denoiser_layers: 4
+  d_model: 256
+  nhead: 4
+  num_layers: 4
+  dim_feedforward: 512
+  dropout: 0.1
+
+loss:
+  base_weight: 1.0
+  velocity_weight: 0.5
+  acceleration_weight: 0.25
+  smooth_acceleration_weight: 0.05
+  smooth_jerk_weight: 0.01
+  contact_weight: 30.0
+  contact_offset_weight: 0.5
+  contact_distance_weight: 8.0
+  contact_margin: 0.02

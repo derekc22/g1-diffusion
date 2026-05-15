@@ -50,8 +50,15 @@ from utils.inference_optimization import (
     benchmark_inference,
 )
 from utils.contact_constraints import apply_contact_constraints, ContactConstraintProcessor
-from utils.rotation import rot6d_to_quat_xyzw, mat_to_quat_xyzw
+from utils.rotation import quat_to_rot6d_xyzw, rot6d_to_quat_xyzw, mat_to_quat_xyzw
 from utils.general import load_config
+from utils.motion_postprocess import smooth_body_motion_np
+from utils.robot_kinematics import (
+    apply_robot_contact_root_correction,
+    apply_robot_contact_state_refinement,
+    robot_hand_positions,
+    robot_hand_positions_from_state_torch,
+)
 from utils.object_conditioning import (
     apply_object_conditioning_variant,
     describe_object_conditioning_variant,
@@ -91,10 +98,86 @@ class OptimizedOmomoPipeline:
         config: InferenceConfig,
         device: str = "cuda:0",
         contact_threshold: float = 0.03,
+        body_smooth_strength: float = 0.0,
+        body_smooth_window: int = 5,
+        body_smooth_iterations: int = 1,
+        stage1_contact_search_threshold: Optional[float] = None,
+        stage1_max_contact_offset: Optional[float] = 0.02,
+        stage1_max_contact_correction: Optional[float] = 0.06,
+        stage1_fallback_contact_search_threshold: Optional[float] = None,
+        stage1_fallback_max_contact_correction: Optional[float] = None,
+        robot_contact_correction: bool = False,
+        robot_contact_activation_threshold: float = 0.12,
+        robot_contact_max_translation: float = 0.08,
+        robot_contact_smooth_strength: float = 0.55,
+        robot_contact_smooth_window: int = 9,
+        robot_contact_smooth_iterations: int = 2,
+        robot_contact_guidance: bool = False,
+        robot_contact_guidance_steps: int = 3,
+        robot_contact_guidance_lr: float = 0.08,
+        robot_contact_guidance_activation_threshold: float = 0.12,
+        robot_contact_guidance_surface_weight: float = 0.7,
+        robot_contact_guidance_margin: float = 0.0,
+        robot_contact_guidance_max_delta: float = 0.35,
+        robot_contact_guidance_mode: str = "upper",
+        robot_contact_refinement: bool = False,
+        robot_contact_refinement_steps: int = 20,
+        robot_contact_refinement_lr: float = 0.03,
+        robot_contact_refinement_activation_threshold: float = 0.16,
+        robot_contact_refinement_pose_reg_weight: float = 0.002,
+        robot_contact_refinement_velocity_reg_weight: float = 0.02,
+        robot_contact_refinement_acceleration_reg_weight: float = 0.0,
+        robot_contact_refinement_max_joint_delta: float = 0.35,
+        robot_contact_refinement_mode: str = "upper",
+        allow_full_length: bool = False,
     ):
         self.device = torch.device(device)
         self.config = config
         self.contact_threshold = contact_threshold
+        self.body_smooth_strength = float(body_smooth_strength)
+        self.body_smooth_window = int(body_smooth_window)
+        self.body_smooth_iterations = int(body_smooth_iterations)
+        self.stage1_contact_search_threshold = stage1_contact_search_threshold
+        self.stage1_max_contact_offset = stage1_max_contact_offset
+        self.stage1_max_contact_correction = stage1_max_contact_correction
+        self.stage1_fallback_contact_search_threshold = stage1_fallback_contact_search_threshold
+        self.stage1_fallback_max_contact_correction = stage1_fallback_max_contact_correction
+        self.robot_contact_correction = bool(robot_contact_correction)
+        self.robot_contact_activation_threshold = float(robot_contact_activation_threshold)
+        self.robot_contact_max_translation = float(robot_contact_max_translation)
+        self.robot_contact_smooth_strength = float(robot_contact_smooth_strength)
+        self.robot_contact_smooth_window = int(robot_contact_smooth_window)
+        self.robot_contact_smooth_iterations = int(robot_contact_smooth_iterations)
+        self.robot_contact_guidance = bool(robot_contact_guidance)
+        self.robot_contact_guidance_steps = int(robot_contact_guidance_steps)
+        self.robot_contact_guidance_lr = float(robot_contact_guidance_lr)
+        self.robot_contact_guidance_activation_threshold = float(
+            robot_contact_guidance_activation_threshold
+        )
+        self.robot_contact_guidance_surface_weight = float(robot_contact_guidance_surface_weight)
+        self.robot_contact_guidance_margin = float(robot_contact_guidance_margin)
+        self.robot_contact_guidance_max_delta = float(robot_contact_guidance_max_delta)
+        self.robot_contact_guidance_mode = str(robot_contact_guidance_mode).lower()
+        self.robot_contact_refinement = bool(robot_contact_refinement)
+        self.robot_contact_refinement_steps = int(robot_contact_refinement_steps)
+        self.robot_contact_refinement_lr = float(robot_contact_refinement_lr)
+        self.robot_contact_refinement_activation_threshold = float(
+            robot_contact_refinement_activation_threshold
+        )
+        self.robot_contact_refinement_pose_reg_weight = float(
+            robot_contact_refinement_pose_reg_weight
+        )
+        self.robot_contact_refinement_velocity_reg_weight = float(
+            robot_contact_refinement_velocity_reg_weight
+        )
+        self.robot_contact_refinement_acceleration_reg_weight = float(
+            robot_contact_refinement_acceleration_reg_weight
+        )
+        self.robot_contact_refinement_max_joint_delta = float(
+            robot_contact_refinement_max_joint_delta
+        )
+        self.robot_contact_refinement_mode = str(robot_contact_refinement_mode).lower()
+        self.allow_full_length = bool(allow_full_length)
         
         # Determine dtype from config
         if config.precision == PrecisionMode.FP16:
@@ -134,7 +217,14 @@ class OptimizedOmomoPipeline:
         self._create_samplers()
         
         # Contact processor
-        self.contact_processor = ContactConstraintProcessor(contact_threshold=contact_threshold)
+        self.contact_processor = ContactConstraintProcessor(
+            contact_threshold=contact_threshold,
+            contact_search_threshold=stage1_contact_search_threshold,
+            max_contact_offset=stage1_max_contact_offset,
+            max_contact_correction=stage1_max_contact_correction,
+            fallback_contact_search_threshold=stage1_fallback_contact_search_threshold,
+            fallback_max_contact_correction=stage1_fallback_max_contact_correction,
+        )
         
         self._is_warmed_up = False
     
@@ -244,12 +334,29 @@ class OptimizedOmomoPipeline:
         norm = {
             "state_mean": norm_stats.get("state_mean"),
             "state_std": norm_stats.get("state_std"),
+            "hand_mean": norm_stats.get("hand_mean"),
+            "hand_std": norm_stats.get("hand_std"),
+            "normalize_hands": dataset_cfg.get("normalize_hands", False),
         }
         if norm["state_mean"] is not None:
             norm["state_mean"] = norm["state_mean"].to(self.device)
             norm["state_std"] = norm["state_std"].to(self.device)
+        if norm["hand_mean"] is not None:
+            norm["hand_mean"] = norm["hand_mean"].to(self.device)
+            norm["hand_std"] = norm["hand_std"].to(self.device)
         
         return model, timesteps, norm, max_len, state_dim
+
+    def _prepare_stage2_condition(self, hands: torch.Tensor) -> torch.Tensor:
+        if not self.stage2_norm.get("normalize_hands", False):
+            return hands
+        hand_mean = self.stage2_norm.get("hand_mean")
+        hand_std = self.stage2_norm.get("hand_std")
+        if hand_mean is None or hand_std is None:
+            return hands
+        mean = hand_mean.to(device=hands.device, dtype=hands.dtype).view(1, 1, -1)
+        std = hand_std.to(device=hands.device, dtype=hands.dtype).view(1, 1, -1)
+        return (hands - mean) / std
     
     def _apply_optimizations(self):
         """Apply precision and compilation optimizations."""
@@ -404,6 +511,185 @@ class OptimizedOmomoPipeline:
             device=self.device,
             dtype=self.dtype,
         )
+
+    def _stage2_guidance_state_mask(self, x: torch.Tensor) -> torch.Tensor:
+        mask = torch.zeros_like(x)
+        mode = self.robot_contact_guidance_mode
+
+        if mode == "root":
+            mask[..., :3] = 1.0
+        elif mode == "root_pose":
+            mask[..., :9] = 1.0
+        elif mode in ("upper", "arms", "all"):
+            if mode == "all":
+                mask[...] = 1.0
+            else:
+                mask[..., :9] = 1.0
+                # State layout is [root_pos(3), root_rot_6d(6), dof_pos(29)].
+                # DoF 12:28 are waist and arm joints for the G1 model.
+                mask[..., 9 + 12 : 9 + 29] = 1.0
+        else:
+            mask[..., :3] = 1.0
+
+        return mask
+
+    def _prepare_robot_contact_guidance_targets(
+        self,
+        hands_rectified: np.ndarray,
+        object_verts: Optional[np.ndarray],
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Dict[str, object]]:
+        if object_verts is None:
+            target = torch.from_numpy(hands_rectified).to(self.device, dtype=torch.float32)
+            mask = torch.ones((target.shape[0], 2), device=self.device, dtype=torch.float32)
+            return target.unsqueeze(0), mask.unsqueeze(0), {
+                "available": True,
+                "source": "hands_rectified",
+                "active_frames": int(target.shape[0]),
+                "left_active_frames": int(target.shape[0]),
+                "right_active_frames": int(target.shape[0]),
+            }
+
+        hands = np.asarray(hands_rectified, dtype=np.float32)
+        verts = np.asarray(object_verts, dtype=np.float32)
+        T = min(hands.shape[0], verts.shape[0])
+        if T == 0:
+            return None, None, {"available": False, "reason": "empty sequence"}
+
+        target = hands[:T].reshape(T, 2, 3).copy()
+        active = np.zeros((T, 2), dtype=np.float32)
+        surface_weight = float(np.clip(self.robot_contact_guidance_surface_weight, 0.0, 1.0))
+
+        for frame in range(T):
+            verts_t = verts[frame]
+            for hand_idx in range(2):
+                hand = hands[frame, hand_idx * 3 : hand_idx * 3 + 3]
+                dists = np.linalg.norm(verts_t - hand[None, :], axis=1)
+                nearest_idx = int(np.argmin(dists))
+                nearest = verts_t[nearest_idx]
+                if float(dists[nearest_idx]) <= self.robot_contact_guidance_activation_threshold:
+                    active[frame, hand_idx] = 1.0
+                    target[frame, hand_idx] = (
+                        (1.0 - surface_weight) * hand + surface_weight * nearest
+                    )
+
+        if not np.any(active):
+            return None, None, {
+                "available": False,
+                "reason": "no active Stage 1/object contact frames",
+                "activation_threshold": self.robot_contact_guidance_activation_threshold,
+            }
+
+        target_t = torch.from_numpy(target.reshape(T, 6)).to(self.device, dtype=torch.float32)
+        active_t = torch.from_numpy(active).to(self.device, dtype=torch.float32)
+        return target_t.unsqueeze(0), active_t.unsqueeze(0), {
+            "available": True,
+            "source": "object_surface_anchor_blend",
+            "active_frames": int(np.sum(np.any(active > 0.0, axis=1))),
+            "left_active_frames": int(np.sum(active[:, 0] > 0.0)),
+            "right_active_frames": int(np.sum(active[:, 1] > 0.0)),
+            "activation_threshold": self.robot_contact_guidance_activation_threshold,
+            "surface_weight": surface_weight,
+        }
+
+    def _guide_stage2_x0(
+        self,
+        x0_pred: torch.Tensor,
+        target_hands: torch.Tensor,
+        active_mask: torch.Tensor,
+    ) -> Tuple[torch.Tensor, float]:
+        if active_mask.sum() <= 0:
+            return x0_pred, 0.0
+
+        x0 = x0_pred.detach().float().clone().requires_grad_(True)
+        state = self._denormalize(
+            x0,
+            self.stage2_norm["state_mean"],
+            self.stage2_norm["state_std"],
+        )
+        robot_hands = robot_hand_positions_from_state_torch(state).view(
+            state.shape[0], state.shape[1], 2, 3
+        )
+        target = target_hands[:, : state.shape[1]].view(state.shape[0], state.shape[1], 2, 3)
+        mask = active_mask[:, : state.shape[1]].unsqueeze(-1)
+
+        delta = robot_hands - target
+        distance = torch.linalg.norm(delta, dim=-1)
+        if self.robot_contact_guidance_margin > 0.0:
+            contact_error = torch.relu(distance - self.robot_contact_guidance_margin).pow(2)
+            energy = (contact_error * active_mask[:, : state.shape[1]]).sum()
+        else:
+            energy = (delta.pow(2) * mask).sum()
+        energy = energy / active_mask[:, : state.shape[1]].sum().clamp_min(1.0)
+
+        grad = torch.autograd.grad(energy, x0, retain_graph=False, create_graph=False)[0]
+        grad = grad * self._stage2_guidance_state_mask(grad)
+        guided = x0 - self.robot_contact_guidance_lr * grad
+
+        if self.robot_contact_guidance_max_delta > 0.0:
+            step_delta = (guided - x0).clamp(
+                -self.robot_contact_guidance_max_delta,
+                self.robot_contact_guidance_max_delta,
+            )
+            guided = x0 + step_delta
+
+        return guided.detach().to(dtype=x0_pred.dtype), float(energy.detach().cpu())
+
+    def _sample_stage2_fast_guided(
+        self,
+        cond: torch.Tensor,
+        target_hands: Optional[torch.Tensor],
+        active_mask: Optional[torch.Tensor],
+    ) -> Tuple[torch.Tensor, Dict[str, object]]:
+        if (
+            not self.robot_contact_guidance
+            or target_hands is None
+            or active_mask is None
+            or not isinstance(self.stage2_sampler, DDIMSampler)
+        ):
+            return self._sample_stage2_fast(cond), {"applied": False}
+
+        B, T, _ = cond.shape
+        x = torch.randn((B, T, self.state_dim), device=self.device, dtype=self.dtype)
+        guide_steps = max(0, min(self.robot_contact_guidance_steps, len(self.stage2_sampler.timesteps)))
+        guide_start = len(self.stage2_sampler.timesteps) - guide_steps
+        energies = []
+
+        for step_idx, t in enumerate(self.stage2_sampler.timesteps):
+            t_batch = torch.full((B,), t, device=self.device, dtype=torch.long)
+            with torch.no_grad():
+                x0_pred = self.stage2_model(x, t_batch, cond)
+
+            if step_idx >= guide_start:
+                x0_pred, energy = self._guide_stage2_x0(x0_pred, target_hands, active_mask)
+                energies.append(energy)
+
+            if step_idx < len(self.stage2_sampler.timesteps) - 1:
+                alpha_t = self.stage2_sampler.alphas_cumprod[t]
+                alpha_prev = self.stage2_sampler.alphas_cumprod[
+                    self.stage2_sampler.timesteps[step_idx + 1]
+                ]
+                pred_noise = (x - torch.sqrt(alpha_t) * x0_pred) / torch.sqrt(1 - alpha_t)
+                sigma = self.stage2_sampler.eta * torch.sqrt(
+                    (1 - alpha_prev) / (1 - alpha_t) * (1 - alpha_t / alpha_prev)
+                )
+                dir_xt = torch.sqrt(1 - alpha_prev - sigma**2) * pred_noise
+                x = torch.sqrt(alpha_prev) * x0_pred + dir_xt
+                if self.stage2_sampler.eta > 0:
+                    x = x + sigma * torch.randn_like(x)
+            else:
+                x = x0_pred
+
+        metadata: Dict[str, object] = {
+            "applied": True,
+            "steps": int(guide_steps),
+            "lr": self.robot_contact_guidance_lr,
+            "mode": self.robot_contact_guidance_mode,
+            "max_delta": self.robot_contact_guidance_max_delta,
+        }
+        if energies:
+            metadata["energy_first"] = float(energies[0])
+            metadata["energy_last"] = float(energies[-1])
+        return x, metadata
     
     @torch.inference_mode()
     def _sample_stage2_ddpm(
@@ -468,13 +754,13 @@ class OptimizedOmomoPipeline:
             std = std.view(1, -1)
         return (x - mean.to(x.dtype)) / std.to(x.dtype)
     
-    @torch.inference_mode()
     def generate(
         self,
         bps_encoding: np.ndarray,
         object_centroid: np.ndarray,
         object_verts: Optional[np.ndarray] = None,
         object_rotation: Optional[np.ndarray] = None,
+        contact_labels: Optional[np.ndarray] = None,
         apply_constraints: bool = True,
         partial_motion_length: Optional[int] = None,
     ) -> Dict[str, np.ndarray]:
@@ -507,6 +793,8 @@ class OptimizedOmomoPipeline:
                     object_verts = object_verts[:partial_motion_length]
                 if object_rotation is not None:
                     object_rotation = object_rotation[:partial_motion_length]
+                if contact_labels is not None:
+                    contact_labels = contact_labels[:partial_motion_length]
                 partial = True
                 target_len = partial_motion_length
             else:
@@ -515,9 +803,10 @@ class OptimizedOmomoPipeline:
         # Update working length to reflect potential partial motion
         T_working = object_centroid.shape[0]
         
-        # Truncate if sequence exceeds max_len (positional encoding limit)
+        # Truncate if sequence exceeds the configured checkpoint max_len unless
+        # explicitly running a full-length extrapolation pass.
         max_len = self.stage1_max_len  # Use stage1 max_len as reference
-        if T_working > max_len:
+        if T_working > max_len and not self.allow_full_length:
             print(f"  Warning: Truncating sequence from {T_working} to {max_len} frames")
             bps_encoding = bps_encoding[:max_len]
             object_centroid = object_centroid[:max_len]
@@ -525,7 +814,14 @@ class OptimizedOmomoPipeline:
                 object_verts = object_verts[:max_len]
             if object_rotation is not None:
                 object_rotation = object_rotation[:max_len]
+            if contact_labels is not None:
+                contact_labels = contact_labels[:max_len]
             truncated = True
+        elif T_working > max_len:
+            print(
+                f"  Warning: Running full length {T_working} frames "
+                f"past checkpoint max_len={max_len}"
+            )
         
         object_conditioning = apply_object_conditioning_variant(
             variant=self.object_conditioning_variant,
@@ -564,7 +860,7 @@ class OptimizedOmomoPipeline:
         # Apply contact constraints
         if apply_constraints and object_verts is not None and object_rotation is not None:
             hands_rect_np, contact_metadata = self.contact_processor.process(
-                hands_raw_np, object_verts, object_rotation
+                hands_raw_np, object_verts, object_rotation, contact_labels=contact_labels
             )
             hands_rect = torch.from_numpy(hands_rect_np).to(self.device, dtype=self.dtype)
             hands_rect = hands_rect.unsqueeze(0)
@@ -574,12 +870,22 @@ class OptimizedOmomoPipeline:
             contact_metadata = None
         
         # Stage 2: Generate full body
-        # NOTE: Stage 2 takes DENORMALIZED hand positions as conditioning
-        # (This matches baseline - do NOT normalize hands_rect here)
+        stage2_cond = self._prepare_stage2_condition(hands_rect)
         if self.stage2_sampler is not None:
-            state_norm = self._sample_stage2_fast(hands_rect)
+            guidance_target, guidance_mask, guidance_metadata = (
+                self._prepare_robot_contact_guidance_targets(hands_rect_np, object_verts)
+                if self.robot_contact_guidance
+                else (None, None, {"available": False})
+            )
+            state_norm, robot_contact_guidance_metadata = self._sample_stage2_fast_guided(
+                stage2_cond,
+                guidance_target,
+                guidance_mask,
+            )
+            robot_contact_guidance_metadata.update(guidance_metadata)
         else:
-            state_norm = self._sample_stage2_ddpm(hands_rect)
+            state_norm = self._sample_stage2_ddpm(stage2_cond)
+            robot_contact_guidance_metadata = {"applied": False, "reason": "ddpm sampler"}
         
         # Denormalize state
         state = self._denormalize(
@@ -597,11 +903,67 @@ class OptimizedOmomoPipeline:
         # Convert 6D rotation to quaternion
         root_rot_6d_t = torch.from_numpy(root_rot_6d).float()
         root_rot_quat = rot6d_to_quat_xyzw(root_rot_6d_t).numpy()
+        root_pos, root_rot_quat, dof_pos = smooth_body_motion_np(
+            root_pos,
+            root_rot_quat,
+            dof_pos,
+            strength=self.body_smooth_strength,
+            window=self.body_smooth_window,
+            iterations=self.body_smooth_iterations,
+        )
+
+        robot_contact_metadata = None
+        if self.robot_contact_correction:
+            root_pos_corrected, robot_contact_metadata = apply_robot_contact_root_correction(
+                root_pos=root_pos,
+                root_rot_xyzw=root_rot_quat,
+                dof_pos=dof_pos,
+                target_hands=hands_rect_np,
+                object_verts=object_verts,
+                contact_threshold=self.contact_threshold,
+                activation_threshold=self.robot_contact_activation_threshold,
+                max_translation=self.robot_contact_max_translation,
+                smooth_strength=self.robot_contact_smooth_strength,
+                smooth_window=self.robot_contact_smooth_window,
+                smooth_iterations=self.robot_contact_smooth_iterations,
+            )
+            root_pos = root_pos_corrected
+            state_np[:, :3] = root_pos
+
+        robot_contact_refinement_metadata = None
+        if self.robot_contact_refinement:
+            root_pos, root_rot_quat, dof_pos, robot_contact_refinement_metadata = (
+                apply_robot_contact_state_refinement(
+                    root_pos=root_pos,
+                    root_rot_xyzw=root_rot_quat,
+                    dof_pos=dof_pos,
+                    target_hands=hands_rect_np,
+                    object_verts=object_verts,
+                    activation_threshold=self.robot_contact_refinement_activation_threshold,
+                    steps=self.robot_contact_refinement_steps,
+                    lr=self.robot_contact_refinement_lr,
+                    pose_reg_weight=self.robot_contact_refinement_pose_reg_weight,
+                    velocity_reg_weight=self.robot_contact_refinement_velocity_reg_weight,
+                    acceleration_reg_weight=self.robot_contact_refinement_acceleration_reg_weight,
+                    max_joint_delta=self.robot_contact_refinement_max_joint_delta,
+                    mode=self.robot_contact_refinement_mode,
+                    device=str(self.device),
+                )
+            )
+            state_np[:, :3] = root_pos
+            state_np[:, 3:9] = quat_to_rot6d_xyzw(torch.from_numpy(root_rot_quat).float()).numpy()
+            state_np[:, 9:] = dof_pos
+
+        robot_hands = robot_hand_positions(root_pos, root_rot_quat, dof_pos)
         
         return {
             "hands_raw": hands_raw_np,
             "hands_rectified": hands_rect_np,
             "contact_metadata": contact_metadata,
+            "robot_hands": robot_hands,
+            "robot_contact_metadata": robot_contact_metadata,
+            "robot_contact_guidance_metadata": robot_contact_guidance_metadata,
+            "robot_contact_refinement_metadata": robot_contact_refinement_metadata,
             "state": state_np,
             "root_pos": root_pos,
             "root_rot": root_rot_quat,
@@ -651,7 +1013,6 @@ def main():
     yml = load_config(args.config_path)
     
     sample_yml = yml["sample"]
-    dataset_yml = yml.get("dataset", {})
     opt_yml = yml.get("optimization", {})
     
     root_dir = yml["root_dir"]
@@ -684,6 +1045,56 @@ def main():
         config=inf_config,
         device=str(device),
         contact_threshold=sample_yml.get("contact_threshold", 0.03),
+        body_smooth_strength=sample_yml.get("body_smooth_strength", 0.0),
+        body_smooth_window=sample_yml.get("body_smooth_window", 5),
+        body_smooth_iterations=sample_yml.get("body_smooth_iterations", 1),
+        stage1_contact_search_threshold=sample_yml.get("stage1_contact_search_threshold", None),
+        stage1_max_contact_offset=sample_yml.get("stage1_max_contact_offset", 0.02),
+        stage1_max_contact_correction=sample_yml.get("stage1_max_contact_correction", 0.06),
+        stage1_fallback_contact_search_threshold=sample_yml.get(
+            "stage1_fallback_contact_search_threshold", None
+        ),
+        stage1_fallback_max_contact_correction=sample_yml.get(
+            "stage1_fallback_max_contact_correction", None
+        ),
+        robot_contact_correction=sample_yml.get("robot_contact_correction", False),
+        robot_contact_activation_threshold=sample_yml.get("robot_contact_activation_threshold", 0.12),
+        robot_contact_max_translation=sample_yml.get("robot_contact_max_translation", 0.08),
+        robot_contact_smooth_strength=sample_yml.get("robot_contact_smooth_strength", 0.55),
+        robot_contact_smooth_window=sample_yml.get("robot_contact_smooth_window", 9),
+        robot_contact_smooth_iterations=sample_yml.get("robot_contact_smooth_iterations", 2),
+        robot_contact_guidance=sample_yml.get("robot_contact_guidance", False),
+        robot_contact_guidance_steps=sample_yml.get("robot_contact_guidance_steps", 3),
+        robot_contact_guidance_lr=sample_yml.get("robot_contact_guidance_lr", 0.08),
+        robot_contact_guidance_activation_threshold=sample_yml.get(
+            "robot_contact_guidance_activation_threshold", 0.12
+        ),
+        robot_contact_guidance_surface_weight=sample_yml.get(
+            "robot_contact_guidance_surface_weight", 0.7
+        ),
+        robot_contact_guidance_margin=sample_yml.get("robot_contact_guidance_margin", 0.0),
+        robot_contact_guidance_max_delta=sample_yml.get("robot_contact_guidance_max_delta", 0.35),
+        robot_contact_guidance_mode=sample_yml.get("robot_contact_guidance_mode", "upper"),
+        robot_contact_refinement=sample_yml.get("robot_contact_refinement", False),
+        robot_contact_refinement_steps=sample_yml.get("robot_contact_refinement_steps", 20),
+        robot_contact_refinement_lr=sample_yml.get("robot_contact_refinement_lr", 0.03),
+        robot_contact_refinement_activation_threshold=sample_yml.get(
+            "robot_contact_refinement_activation_threshold", 0.16
+        ),
+        robot_contact_refinement_pose_reg_weight=sample_yml.get(
+            "robot_contact_refinement_pose_reg_weight", 0.002
+        ),
+        robot_contact_refinement_velocity_reg_weight=sample_yml.get(
+            "robot_contact_refinement_velocity_reg_weight", 0.02
+        ),
+        robot_contact_refinement_acceleration_reg_weight=sample_yml.get(
+            "robot_contact_refinement_acceleration_reg_weight", 0.0
+        ),
+        robot_contact_refinement_max_joint_delta=sample_yml.get(
+            "robot_contact_refinement_max_joint_delta", 0.35
+        ),
+        robot_contact_refinement_mode=sample_yml.get("robot_contact_refinement_mode", "upper"),
+        allow_full_length=sample_yml.get("allow_full_length", False),
     )
     
     # Output directory - match original naming pattern + optional exp_name
@@ -694,16 +1105,13 @@ def main():
     exp_name = yml.get("exp_name", "")
     suffix = f"_{exp_name}" if exp_name else ""
     
-    # Get dataset config for folder naming
-    window_size = dataset_yml.get("window_size", 120)
-    stride = dataset_yml.get("stride", 10)
     timesteps = 1000  # Default timesteps
     
     ckpt_parts = stage2_ckpt_path.split("/")
     if "logs" in ckpt_parts and "checkpoints" in ckpt_parts:
         logs_idx = ckpt_parts.index("logs")
         log_id = ckpt_parts[logs_idx + 1]
-        sample_folder = f"ts{timesteps}_w{window_size}_s{stride}_{timestamp}{suffix}"
+        sample_folder = f"ts{timesteps}_{timestamp}{suffix}"
         output_dir = os.path.join("logs", log_id, "samples", sample_folder)
     else:
         output_dir = f"./out/e2e_{timestamp}{suffix}"
@@ -770,6 +1178,7 @@ def main():
             object_centroid=data["object_centroid"],
             object_verts=data.get("object_verts"),
             object_rotation=data.get("object_rotation"),
+            contact_labels=data.get("contact"),
             apply_constraints=apply_constraints,
             partial_motion_length=partial_motion_length,
         )

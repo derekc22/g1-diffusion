@@ -32,3 +32,14 @@ model:
   num_layers: 4
   dim_feedforward: 512
   dropout: 0.1
+
+loss:
+  base_weight: 1.0
+  velocity_weight: 0.5
+  acceleration_weight: 0.25
+  smooth_acceleration_weight: 0.05
+  smooth_jerk_weight: 0.01
+  contact_weight: 20.0
+  contact_offset_weight: 1.0
+  contact_distance_weight: 5.0
+  contact_margin: 0.025

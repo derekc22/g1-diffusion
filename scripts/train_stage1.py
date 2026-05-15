@@ -14,6 +14,7 @@ Usage:
 import os
 import sys
 import argparse
+import time
 from datetime import datetime
 
 # Ensure project root is on sys.path
@@ -39,6 +40,14 @@ from utils.object_conditioning import (
     describe_object_conditioning_variant,
     normalize_object_conditioning_variant,
 )
+from utils.object_sampling import build_balanced_sampler, format_label_counts
+from utils.motion_losses import (
+    contact_anchor_loss,
+    denormalize,
+    format_metrics,
+    loss_config,
+    temporal_reconstruction_loss,
+)
 
 
 def main():
@@ -51,6 +60,7 @@ def main():
     train_yml = yml["train"]
     dataset_yml = yml["dataset"]
     model_yml = yml["model"]
+    loss_cfg = loss_config(yml, "stage1")
 
     root_dir = yml["root_dir"]
 
@@ -63,6 +73,10 @@ def main():
     architecture = train_yml["architecture"]
     save_every = train_yml.get("save_every", 100)
     exp_prefix = train_yml.get("exp_prefix", "stage1")
+    init_ckpt_path = train_yml.get("init_ckpt_path")
+    resume_optimizer = train_yml.get("resume_optimizer", False)
+    max_train_seconds = train_yml.get("max_train_seconds")
+    max_train_seconds = float(max_train_seconds) if max_train_seconds is not None else None
 
     # Dataset config
     window_size = dataset_yml["window_size"]
@@ -111,6 +125,12 @@ def main():
         train_split=train_split,
         preload=preload,  # Use config value
         flatten_bps=True,
+        include_contact_data=(
+            loss_cfg["contact_weight"] > 0.0
+            or loss_cfg["contact_offset_weight"] > 0.0
+            or loss_cfg["contact_distance_weight"] > 0.0
+        ),
+        contact_threshold=loss_cfg["contact_margin"],
         object_conditioning_variant=object_conditioning_variant,
     )
 
@@ -118,10 +138,22 @@ def main():
     print(f"  Files: {dataset.num_files}")
     print(f"  Hand mean shape: {dataset.hand_mean.shape}")
 
+    sampler = None
+    if dataset_yml.get("balance_by_object", False):
+        object_labels = dataset.get_window_object_names()
+        sampler = build_balanced_sampler(
+            object_labels,
+            power=float(dataset_yml.get("object_balance_power", 1.0)),
+            min_count=int(dataset_yml.get("object_balance_min_count", 1)),
+            seed=train_yml.get("seed"),
+        )
+        print(f"  Object-balanced sampler: {format_label_counts(object_labels)}")
+
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=sampler is None,
+        sampler=sampler,
         drop_last=True,
         num_workers=4,
         pin_memory=True,
@@ -182,10 +214,21 @@ def main():
     # Optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
+    if init_ckpt_path:
+        print(f"Initializing from checkpoint: {init_ckpt_path}")
+        init_ckpt = torch.load(init_ckpt_path, map_location=device)
+        model.load_state_dict(init_ckpt["model"])
+        if resume_optimizer and "optimizer" in init_ckpt:
+            optimizer.load_state_dict(init_ckpt["optimizer"])
+
     # Training loop
     print(f"\nStarting training for {num_epochs} epochs")
+    if max_train_seconds is not None:
+        print(f"  Max train time: {max_train_seconds:.0f}s")
     global_step = 0
     losses = []
+    train_start_time = time.monotonic()
+    ckpt_file = None
 
     for epoch in range(num_epochs):
         epoch_loss = 0.0
@@ -209,8 +252,21 @@ def main():
             # Predict clean hand positions
             hand_pred = model(hand_noisy, t, bps, centroid)
 
-            # Loss: predict x0 (clean data)
-            loss = F.mse_loss(hand_pred, hand_pos)
+            # Loss: predict x0 (clean data) plus physical regularizers.
+            base_loss = F.mse_loss(hand_pred, hand_pos)
+            hand_pred_phys = denormalize(hand_pred, dataset.hand_mean, dataset.hand_std)
+            hand_pos_phys = denormalize(hand_pos, dataset.hand_mean, dataset.hand_std)
+            temporal_loss, temporal_metrics = temporal_reconstruction_loss(
+                hand_pred_phys,
+                hand_pos_phys,
+                loss_cfg,
+            )
+            contact_loss, contact_metrics = contact_anchor_loss(
+                hand_pred_phys,
+                batch,
+                loss_cfg,
+            )
+            loss = loss_cfg["base_weight"] * base_loss + temporal_loss + contact_loss
 
             # Backprop
             optimizer.zero_grad()
@@ -221,7 +277,15 @@ def main():
             num_batches += 1
 
             if global_step % 50 == 0:
-                print(f"Epoch {epoch} Step {step} (global {global_step}): loss={loss.item():.6f}")
+                metrics = {
+                    "base": float(base_loss.detach().cpu()),
+                    **temporal_metrics,
+                    **contact_metrics,
+                }
+                print(
+                    f"Epoch {epoch} Step {step} (global {global_step}): "
+                    f"loss={loss.item():.6f} {format_metrics(metrics)}"
+                )
 
             global_step += 1
 
@@ -231,7 +295,11 @@ def main():
         print(f"Epoch {epoch}: avg_loss={avg_loss:.6f}")
 
         # Save checkpoint
-        if (epoch + 1) % save_every == 0 or epoch == num_epochs - 1:
+        should_stop = (
+            max_train_seconds is not None
+            and time.monotonic() - train_start_time >= max_train_seconds
+        )
+        if (epoch + 1) % save_every == 0 or epoch == num_epochs - 1 or should_stop:
             ckpt_file = os.path.join(ckpt_path, f"stage1_epoch_{str(epoch).zfill(6)}.pt")
             torch.save({
                 "model": model.state_dict(),
@@ -255,6 +323,11 @@ def main():
             plt.grid(True)
             plt.savefig(os.path.join(figure_path, f"loss_epoch_{epoch}.png"))
             plt.close()
+
+        if should_stop:
+            elapsed = time.monotonic() - train_start_time
+            print(f"Stopping after {elapsed:.1f}s due to train.max_train_seconds")
+            break
 
     print(f"\nTraining complete!")
     print(f"Final checkpoint: {ckpt_file}")

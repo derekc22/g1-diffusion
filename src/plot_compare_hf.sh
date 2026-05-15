@@ -6,7 +6,7 @@ set -e
 
 source /home/learning/miniconda3/etc/profile.d/conda.sh
 
-ROBOT_MOTION_MODEL_FOLDER_ALL="/home/learning/Documents/g1-diffusion/logs/stage2_hf_e10000_b128_lr0.0001_ts1000_w120_s10_transformer_2026Apr01_00-40-53/samples"
+ROBOT_MOTION_MODEL_FOLDER_ALL="/home/learning/Documents/g1-diffusion/logs/stage2_hf_e10000_b128_lr0.0001_ts1000_w120_s10_transformer_2026May07_22-33-42/samples"
 SAVE_DIR="/home/learning/Documents/g1-diffusion/figures/compare_hf"
 
 conda activate g1-diffusion

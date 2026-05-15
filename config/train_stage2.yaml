@@ -31,3 +31,10 @@ model:
   num_layers: 8  # Paper uses 4 self-attention blocks
   dim_feedforward: 512
   dropout: 0.1
+
+loss:
+  base_weight: 1.0
+  velocity_weight: 0.2
+  acceleration_weight: 0.1
+  smooth_acceleration_weight: 0.02
+  smooth_jerk_weight: 0.005

@@ -36,6 +36,12 @@ from datasets.g1_motion_dataset import G1MotionDatasetHandCond
 from models.stage2_flow_matching import Stage2FMTransformerModel, Stage2FMMLPModel
 from utils.flow_matching import FlowMatchingConfig, FlowMatchingSchedule
 from utils.general import load_config, dump_config
+from utils.motion_losses import (
+    denormalize,
+    format_metrics,
+    loss_config,
+    temporal_reconstruction_loss,
+)
 
 
 def main():
@@ -43,6 +49,7 @@ def main():
     train_yml = yml["train"]
     dataset_yml = yml["dataset"]
     model_yml = yml["model"]
+    loss_cfg = loss_config(yml, "stage2")
 
     root_dir = yml["root_dir"]
 
@@ -191,7 +198,16 @@ def main():
             velocity_pred = model(x_t, t, cond)
 
             # 6. Loss
-            loss = F.mse_loss(velocity_pred, velocity_target)
+            base_loss = F.mse_loss(velocity_pred, velocity_target)
+            state_pred = x0 - velocity_pred
+            state_pred_phys = denormalize(state_pred, dataset.state_mean, dataset.state_std)
+            state_phys = denormalize(state, dataset.state_mean, dataset.state_std)
+            temporal_loss, temporal_metrics = temporal_reconstruction_loss(
+                state_pred_phys,
+                state_phys,
+                loss_cfg,
+            )
+            loss = loss_cfg["base_weight"] * base_loss + temporal_loss
 
             # Backprop
             optimizer.zero_grad()
@@ -202,7 +218,14 @@ def main():
             num_batches += 1
 
             if global_step % 50 == 0:
-                print(f"Epoch {epoch} Step {step} (global {global_step}): loss={loss.item():.6f}")
+                metrics = {
+                    "base": float(base_loss.detach().cpu()),
+                    **temporal_metrics,
+                }
+                print(
+                    f"Epoch {epoch} Step {step} (global {global_step}): "
+                    f"loss={loss.item():.6f} {format_metrics(metrics)}"
+                )
 
             global_step += 1
 

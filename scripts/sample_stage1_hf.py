@@ -332,7 +332,6 @@ def main():
 
     yml = load_config(args.config_path)
     sample_yml = yml["sample"]
-    dataset_yml = yml.get("dataset", {})
 
     root_dir = yml["root_dir"]
     ckpt_path = sample_yml["ckpt_path"]
@@ -358,9 +357,7 @@ def main():
     if "logs" in ckpt_parts and "checkpoints" in ckpt_parts:
         logs_idx = ckpt_parts.index("logs")
         log_id = ckpt_parts[logs_idx + 1]
-        window_size = dataset_yml.get("window_size", 120)
-        stride = dataset_yml.get("stride", 10)
-        sample_folder = f"ts{timesteps}_w{window_size}_s{stride}_{timestamp}{suffix}"
+        sample_folder = f"ts{timesteps}_{timestamp}{suffix}"
         output_dir = os.path.join("logs", log_id, "samples", sample_folder)
     else:
         output_dir = os.path.join("out", "stage1_hf", timestamp)

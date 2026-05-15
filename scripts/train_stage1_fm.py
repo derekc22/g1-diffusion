@@ -42,6 +42,13 @@ from utils.object_conditioning import (
     describe_object_conditioning_variant,
     normalize_object_conditioning_variant,
 )
+from utils.motion_losses import (
+    contact_anchor_loss,
+    denormalize,
+    format_metrics,
+    loss_config,
+    temporal_reconstruction_loss,
+)
 
 
 def main():
@@ -58,6 +65,7 @@ def main():
     train_yml = yml["train"]
     dataset_yml = yml["dataset"]
     model_yml = yml["model"]
+    loss_cfg = loss_config(yml, "stage1")
 
     root_dir = yml["root_dir"]
 
@@ -125,6 +133,12 @@ def main():
         train_split=train_split,
         preload=preload,
         flatten_bps=True,
+        include_contact_data=(
+            loss_cfg["contact_weight"] > 0.0
+            or loss_cfg["contact_offset_weight"] > 0.0
+            or loss_cfg["contact_distance_weight"] > 0.0
+        ),
+        contact_threshold=loss_cfg["contact_margin"],
         object_conditioning_variant=object_conditioning_variant,
     )
 
@@ -232,8 +246,22 @@ def main():
             # 5. Predict velocity
             velocity_pred = model(x_t, t, bps, centroid)
 
-            # 6. Loss: MSE between predicted and target velocity
-            loss = F.mse_loss(velocity_pred, velocity_target)
+            # 6. Loss: MSE between predicted and target velocity.
+            base_loss = F.mse_loss(velocity_pred, velocity_target)
+            hand_pred = x0 - velocity_pred
+            hand_pred_phys = denormalize(hand_pred, dataset.hand_mean, dataset.hand_std)
+            hand_pos_phys = denormalize(hand_pos, dataset.hand_mean, dataset.hand_std)
+            temporal_loss, temporal_metrics = temporal_reconstruction_loss(
+                hand_pred_phys,
+                hand_pos_phys,
+                loss_cfg,
+            )
+            contact_loss, contact_metrics = contact_anchor_loss(
+                hand_pred_phys,
+                batch,
+                loss_cfg,
+            )
+            loss = loss_cfg["base_weight"] * base_loss + temporal_loss + contact_loss
 
             # Backprop
             optimizer.zero_grad()
@@ -244,7 +272,15 @@ def main():
             num_batches += 1
 
             if global_step % 50 == 0:
-                print(f"Epoch {epoch} Step {step} (global {global_step}): loss={loss.item():.6f}")
+                metrics = {
+                    "base": float(base_loss.detach().cpu()),
+                    **temporal_metrics,
+                    **contact_metrics,
+                }
+                print(
+                    f"Epoch {epoch} Step {step} (global {global_step}): "
+                    f"loss={loss.item():.6f} {format_metrics(metrics)}"
+                )
 
             global_step += 1
 

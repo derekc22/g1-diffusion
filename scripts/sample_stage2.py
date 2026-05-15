@@ -34,6 +34,7 @@ from utils.diffusion import DiffusionConfig, DiffusionSchedule
 from utils.contact_constraints import apply_contact_constraints, ContactConstraintProcessor
 from utils.rotation import rot6d_to_quat_xyzw, mat_to_quat_xyzw
 from utils.general import load_config
+from utils.motion_postprocess import smooth_body_motion_np
 from utils.object_conditioning import (
     apply_object_conditioning_variant,
     describe_object_conditioning_variant,
@@ -79,9 +80,15 @@ class OmomoPipeline:
         stage2_ckpt_path: str,
         device: str = "cuda:0",
         contact_threshold: float = 0.03,
+        body_smooth_strength: float = 0.0,
+        body_smooth_window: int = 5,
+        body_smooth_iterations: int = 1,
     ):
         self.device = torch.device(device)
         self.contact_threshold = contact_threshold
+        self.body_smooth_strength = float(body_smooth_strength)
+        self.body_smooth_window = int(body_smooth_window)
+        self.body_smooth_iterations = int(body_smooth_iterations)
         
         # Load Stage 1
         self.stage1_model, self.stage1_schedule, self.stage1_norm, stage1_max_len = self._load_stage1(stage1_ckpt_path)
@@ -220,12 +227,29 @@ class OmomoPipeline:
         norm = {
             "state_mean": norm_stats.get("state_mean"),
             "state_std": norm_stats.get("state_std"),
+            "hand_mean": norm_stats.get("hand_mean"),
+            "hand_std": norm_stats.get("hand_std"),
+            "normalize_hands": dataset_cfg.get("normalize_hands", False),
         }
         if norm["state_mean"] is not None:
             norm["state_mean"] = norm["state_mean"].to(self.device)
             norm["state_std"] = norm["state_std"].to(self.device)
+        if norm["hand_mean"] is not None:
+            norm["hand_mean"] = norm["hand_mean"].to(self.device)
+            norm["hand_std"] = norm["hand_std"].to(self.device)
         
         return model, schedule, norm, max_len
+
+    def _prepare_stage2_condition(self, hands: torch.Tensor) -> torch.Tensor:
+        if not self.stage2_norm.get("normalize_hands", False):
+            return hands
+        hand_mean = self.stage2_norm.get("hand_mean")
+        hand_std = self.stage2_norm.get("hand_std")
+        if hand_mean is None or hand_std is None:
+            return hands
+        mean = hand_mean.to(device=hands.device, dtype=hands.dtype).view(1, 1, -1)
+        std = hand_std.to(device=hands.device, dtype=hands.dtype).view(1, 1, -1)
+        return (hands - mean) / std
     
     @torch.no_grad()
     def _sample_ddpm(
@@ -296,6 +320,7 @@ class OmomoPipeline:
         object_centroid: np.ndarray,
         object_verts: Optional[np.ndarray] = None,
         object_rotation: Optional[np.ndarray] = None,
+        contact_labels: Optional[np.ndarray] = None,
         apply_constraints: bool = True,
         partial_motion_length: Optional[int] = None,
     ) -> Dict[str, np.ndarray]:
@@ -338,6 +363,8 @@ class OmomoPipeline:
                     object_verts = object_verts[:partial_motion_length]
                 if object_rotation is not None:
                     object_rotation = object_rotation[:partial_motion_length]
+                if contact_labels is not None:
+                    contact_labels = contact_labels[:partial_motion_length]
                 partial = True
                 target_len = partial_motion_length
             else:
@@ -355,6 +382,8 @@ class OmomoPipeline:
                 object_verts = object_verts[:self.max_len]
             if object_rotation is not None:
                 object_rotation = object_rotation[:self.max_len]
+            if contact_labels is not None:
+                contact_labels = contact_labels[:self.max_len]
             truncated = True
         
         T_seq = object_centroid.shape[0]
@@ -400,7 +429,7 @@ class OmomoPipeline:
         # =====================================================================
         if apply_constraints and object_verts is not None and object_rotation is not None:
             hands_rect_np, contact_meta = self.contact_processor.process(
-                hands_raw_np, object_verts, object_rotation
+                hands_raw_np, object_verts, object_rotation, contact_labels=contact_labels
             )
         else:
             hands_rect_np = hands_raw_np
@@ -419,10 +448,11 @@ class OmomoPipeline:
             # Infer from output projection
             state_dim = self.stage2_model.out_proj.out_features
         
+        stage2_cond = self._prepare_stage2_condition(hands_rect)
         state_norm = self._sample_ddpm(
             self.stage2_model,
             self.stage2_schedule,
-            hands_rect,
+            stage2_cond,
             output_dim=state_dim,
         )
         
@@ -441,6 +471,14 @@ class OmomoPipeline:
         # Convert 6D rotation to quaternion
         root_rot_6d_t = torch.from_numpy(root_rot_6d).float()
         root_rot_quat = rot6d_to_quat_xyzw(root_rot_6d_t).numpy()
+        root_pos, root_rot_quat, dof_pos = smooth_body_motion_np(
+            root_pos,
+            root_rot_quat,
+            dof_pos,
+            strength=self.body_smooth_strength,
+            window=self.body_smooth_window,
+            iterations=self.body_smooth_iterations,
+        )
         
         return {
             "hands_raw": hands_raw_np,
@@ -497,11 +535,7 @@ def main():
         logs_idx = ckpt_parts.index("logs")
         log_id = ckpt_parts[logs_idx + 1]
         
-        # Create sample folder name with config info
-        dataset_yml = yml.get("dataset", {})
-        window_size = dataset_yml.get("window_size", 120)
-        stride = dataset_yml.get("stride", 10)
-        sample_folder = f"ts{timesteps}_w{window_size}_s{stride}_{timestamp}{suffix}"
+        sample_folder = f"ts{timesteps}_{timestamp}{suffix}"
         
         output_dir = os.path.join("logs", log_id, "samples", sample_folder)
     # else:
@@ -524,6 +558,9 @@ def main():
         stage2_ckpt_path=stage2_ckpt_path,
         device=device,
         contact_threshold=contact_threshold,
+        body_smooth_strength=sample_yml.get("body_smooth_strength", 0.0),
+        body_smooth_window=sample_yml.get("body_smooth_window", 5),
+        body_smooth_iterations=sample_yml.get("body_smooth_iterations", 1),
     )
 
     # Find input files
@@ -557,6 +594,7 @@ def main():
             object_centroid=data["object_centroid"],
             object_verts=data.get("object_verts"),
             object_rotation=data.get("object_rotation"),
+            contact_labels=data.get("contact"),
             apply_constraints=apply_constraints,
             partial_motion_length=partial_motion_length,
         )

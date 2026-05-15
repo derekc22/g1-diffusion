@@ -53,8 +53,3 @@ optimization:
 # Leave empty for no suffix
 # Example: exp_name: "optimized_fast" → folder ends with "_optimized_fast"
 exp_name: ""
-
-# Dataset settings (inherited or override)
-dataset:
-  window_size: 120
-  stride: 10

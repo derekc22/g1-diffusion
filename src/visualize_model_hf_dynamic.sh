@@ -6,7 +6,7 @@ set -e
 
 source /home/learning/miniconda3/etc/profile.d/conda.sh
 
-ROBOT_MOTION_FOLDER_ALL="/home/learning/Documents/g1-diffusion/logs/stage2_hf_e10000_b128_lr0.0001_ts1000_w120_s10_transformer_2026Apr28_12-24-20/samples"
+ROBOT_MOTION_FOLDER_ALL="/home/learning/Documents/g1-diffusion/logs/stage2_hf_e10000_b128_lr0.0001_ts1000_w120_s10_transformer_2026May07_22-33-42/samples/ts1000_2026May14_17-35-45_agentic_i020_fallback060_refine_smooth_wide_full_length"
 SAVE_DIR="/home/learning/Documents/g1-diffusion/videos"
 OBJECTS_DIR="/home/learning/Documents/omomo_release/data/captured_objects"
 GMR_ROOT="/home/learning/Documents/g1-gmr"
@@ -36,6 +36,7 @@ run_visualizer() {
         --reference_motion_folder "$REFERENCE_MOTION_FOLDER" \
         --record_video \
         --save_dir "$SAVE_DIR" \
+        --no_rate_limit \
         --auto
 
     echo "Done: $folder_name"

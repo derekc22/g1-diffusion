@@ -19,6 +19,8 @@ Usage:
 import os
 import sys
 import types
+import time
+import argparse
 from datetime import datetime
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -57,14 +59,31 @@ from datasets.hf_motion_dataset import HFFullBodyDataset
 from models.stage2_diffusion import Stage2TransformerModel, Stage2MLPModel
 from utils.diffusion import DiffusionConfig, DiffusionSchedule
 from utils.general import load_config, dump_config
+from utils.object_sampling import build_balanced_sampler, format_label_counts
+from utils.motion_losses import (
+    denormalize,
+    format_metrics,
+    loss_config,
+    robot_fk_hand_loss,
+    temporal_reconstruction_loss,
+)
 
 
 def main():
-    yml = load_config(os.path.join(PROJECT_ROOT, "config", "train_stage2_hf.yaml"))
+    parser = argparse.ArgumentParser(description="Stage 2 DDPM Training - HuggingFace Dataset")
+    parser.add_argument(
+        "--config_path",
+        type=str,
+        default=os.path.join(PROJECT_ROOT, "config", "train_stage2_hf.yaml"),
+    )
+    args = parser.parse_args()
+
+    yml = load_config(args.config_path)
 
     train_yml = yml["train"]
     dataset_yml = yml["dataset"]
     model_yml = yml["model"]
+    loss_cfg = loss_config(yml, "stage2")
 
     root_dir = yml["root_dir"]
     if not os.path.isabs(root_dir):
@@ -81,12 +100,22 @@ def main():
     device_str = train_yml["device"]
     architecture = train_yml["architecture"]
     save_every = train_yml.get("save_every", 200)
+    init_ckpt_path = train_yml.get("init_ckpt_path")
+    resume_optimizer = train_yml.get("resume_optimizer", False)
+    max_train_seconds = train_yml.get("max_train_seconds")
+    max_train_seconds = float(max_train_seconds) if max_train_seconds is not None else None
 
     window_size = dataset_yml["window_size"]
     stride = dataset_yml["stride"]
     min_seq_len = dataset_yml["min_seq_len"]
     train_split = dataset_yml["train_split"]
     preload = dataset_yml.get("preload", True)
+    normalize_hands = dataset_yml.get("normalize_hands", False)
+    hand_condition_dir = dataset_yml.get("hand_condition_dir")
+    if hand_condition_dir and not os.path.isabs(hand_condition_dir):
+        hand_condition_dir = os.path.join(PROJECT_ROOT, hand_condition_dir)
+    hand_condition_key = dataset_yml.get("hand_condition_key", "hand_positions")
+    require_hand_condition = dataset_yml.get("require_hand_condition", False)
 
     # Create experiment directory
     dtn = datetime.now().strftime("%Y%b%d_%H-%M-%S")
@@ -118,16 +147,34 @@ def main():
         train=True,
         train_split=train_split,
         preload=preload,
-        normalize_hands=False,  # Same as original — hands not normalized
+        normalize_hands=normalize_hands,
+        hand_condition_dir=hand_condition_dir,
+        hand_condition_key=hand_condition_key,
+        require_hand_condition=require_hand_condition,
     )
 
     print(f"  Windows: {len(dataset)}")
     print(f"  Files: {dataset.num_files}")
+    print(f"  Normalize hand conditioning: {normalize_hands}")
+    if hand_condition_dir:
+        print(f"  Hand conditioning source: {hand_condition_dir} [{hand_condition_key}]")
+
+    sampler = None
+    if dataset_yml.get("balance_by_object", False):
+        object_labels = dataset.get_window_object_names()
+        sampler = build_balanced_sampler(
+            object_labels,
+            power=float(dataset_yml.get("object_balance_power", 1.0)),
+            min_count=int(dataset_yml.get("object_balance_min_count", 1)),
+            seed=train_yml.get("seed"),
+        )
+        print(f"  Object-balanced sampler: {format_label_counts(object_labels)}")
 
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=sampler is None,
+        sampler=sampler,
         drop_last=True,
         num_workers=4,
         pin_memory=True,
@@ -174,16 +221,27 @@ def main():
     # Optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
+    if init_ckpt_path:
+        print(f"Initializing from checkpoint: {init_ckpt_path}")
+        init_ckpt = torch.load(init_ckpt_path, map_location=device)
+        model.load_state_dict(init_ckpt["model"])
+        if resume_optimizer and "optimizer" in init_ckpt:
+            optimizer.load_state_dict(init_ckpt["optimizer"])
+
     # Training loop
     print(f"\nStarting training for {num_epochs} epochs")
     print(f"  Batch size: {batch_size}")
     print(f"  Timesteps: {timesteps}")
     print(f"  Learning rate: {lr}")
+    if max_train_seconds is not None:
+        print(f"  Max train time: {max_train_seconds:.0f}s")
     print()
 
     global_step = 0
     losses = []
     best_loss = float("inf")
+    train_start_time = time.monotonic()
+    ckpt_file = None
 
     for epoch in range(num_epochs):
         model.train()
@@ -207,7 +265,21 @@ def main():
             state_pred = model(state_noisy, t, cond)
 
             # Loss
-            loss = F.mse_loss(state_pred, state)
+            base_loss = F.mse_loss(state_pred, state)
+            state_pred_phys = denormalize(state_pred, dataset.state_mean, dataset.state_std)
+            state_phys = denormalize(state, dataset.state_mean, dataset.state_std)
+            temporal_loss, temporal_metrics = temporal_reconstruction_loss(
+                state_pred_phys,
+                state_phys,
+                loss_cfg,
+            )
+            cond_phys = dataset.denormalize_hands(cond)
+            robot_loss, robot_metrics = robot_fk_hand_loss(
+                state_pred_phys,
+                cond_phys,
+                loss_cfg,
+            )
+            loss = loss_cfg["base_weight"] * base_loss + temporal_loss + robot_loss
 
             # Backprop
             optimizer.zero_grad()
@@ -218,7 +290,15 @@ def main():
             num_batches += 1
 
             if global_step % 50 == 0:
-                print(f"Epoch {epoch} Step {step} (global {global_step}): loss={loss.item():.6f}")
+                metrics = {
+                    "base": float(base_loss.detach().cpu()),
+                    **temporal_metrics,
+                    **robot_metrics,
+                }
+                print(
+                    f"Epoch {epoch} Step {step} (global {global_step}): "
+                    f"loss={loss.item():.6f} {format_metrics(metrics)}"
+                )
 
             global_step += 1
 
@@ -232,7 +312,11 @@ def main():
         print(f"Epoch {epoch}: avg_loss={avg_loss:.6f} (best={best_loss:.6f})")
 
         # Save checkpoint
-        if (epoch + 1) % save_every == 0 or epoch == num_epochs - 1:
+        should_stop = (
+            max_train_seconds is not None
+            and time.monotonic() - train_start_time >= max_train_seconds
+        )
+        if (epoch + 1) % save_every == 0 or epoch == num_epochs - 1 or should_stop:
             ckpt_file = os.path.join(ckpt_path, f"stage2_hf_epoch_{str(epoch).zfill(6)}.pt")
             torch.save({
                 "model": model.state_dict(),
@@ -259,6 +343,11 @@ def main():
             plt.grid(True, alpha=0.3)
             plt.savefig(os.path.join(figure_path, f"loss_epoch_{epoch}.png"), dpi=100)
             plt.close()
+
+        if should_stop:
+            elapsed = time.monotonic() - train_start_time
+            print(f"Stopping after {elapsed:.1f}s due to train.max_train_seconds")
+            break
 
     print(f"\n{'='*60}")
     print(f"Training complete!")

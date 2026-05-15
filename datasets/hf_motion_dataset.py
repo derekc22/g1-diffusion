@@ -21,10 +21,12 @@ from torch.utils.data import Dataset
 
 from utils.rotation import quat_to_rot6d_xyzw
 from utils.normalization import compute_mean_std
+from utils.object_sampling import object_name_from_data
 from utils.object_conditioning import (
     apply_temporal_conditioning_variant,
     normalize_object_conditioning_variant,
 )
+from datasets.hand_motion_dataset import compute_contact_annotations
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +65,8 @@ class HFHandMotionDataset(Dataset):
         hand_mean: Optional[torch.Tensor] = None,
         hand_std: Optional[torch.Tensor] = None,
         require_object: bool = False,
+        include_contact_data: bool = False,
+        contact_threshold: float = 0.05,
         object_conditioning_variant: str = "variant0",
     ):
         super().__init__()
@@ -72,6 +76,8 @@ class HFHandMotionDataset(Dataset):
         self.min_seq_len = min_seq_len
         self.preload = preload
         self.require_object = require_object
+        self.include_contact_data = include_contact_data
+        self.contact_threshold = contact_threshold
         self.object_conditioning_variant = normalize_object_conditioning_variant(
             object_conditioning_variant
         )
@@ -98,8 +104,13 @@ class HFHandMotionDataset(Dataset):
         self.windows: List[Tuple[int, int]] = []
         self._file_cache: Dict[int, Dict[str, Any]] = {}
 
+        self.file_object_names: List[str] = []
+
         for fi, path in enumerate(self.file_paths):
             data = self._load_file(fi, path)
+            self.file_object_names.append(
+                data.get("object_name", "unknown") if data is not None else "unknown"
+            )
             if data is None:
                 continue
             T = data["hand_positions"].shape[0]
@@ -177,6 +188,7 @@ class HFHandMotionDataset(Dataset):
             obj_ang_vel = np.asarray(data.get("object_ang_vel", np.zeros((T, 3))), dtype=np.float32)
 
             # Ensure shapes match
+            fixed_arrays = {}
             for arr_name, arr in [("obj_pos", obj_pos), ("obj_rot_6d", obj_rot_6d),
                                    ("obj_lin_vel", obj_lin_vel), ("obj_ang_vel", obj_ang_vel)]:
                 if arr.shape[0] != T:
@@ -186,18 +198,78 @@ class HFHandMotionDataset(Dataset):
                     else:
                         pad = np.zeros((T - arr.shape[0],) + arr.shape[1:], dtype=np.float32)
                         arr = np.concatenate([arr, pad], axis=0)
+                fixed_arrays[arr_name] = arr
 
-            object_features = np.concatenate([obj_pos, obj_rot_6d, obj_lin_vel, obj_ang_vel], axis=-1)
+            object_features = np.concatenate(
+                [
+                    fixed_arrays["obj_pos"],
+                    fixed_arrays["obj_rot_6d"],
+                    fixed_arrays["obj_lin_vel"],
+                    fixed_arrays["obj_ang_vel"],
+                ],
+                axis=-1,
+            )
         else:
             object_features = np.zeros((T, self.OBJECT_FEATURE_DIM), dtype=np.float32)
 
+        seq_name = data.get("seq_name", os.path.splitext(os.path.basename(path))[0])
         data_proc = {
             "hand_positions": hand_pos,
             "object_features": object_features,
             "has_object": has_object,
-            "seq_name": data.get("seq_name", os.path.splitext(os.path.basename(path))[0]),
+            "seq_name": seq_name,
+            "object_name": object_name_from_data(data, path),
             "fps": float(data.get("fps", 30.0)),
         }
+
+        if self.include_contact_data:
+            object_verts = data.get("object_verts")
+            contact_points = contact_offsets = contact_mask = None
+            has_surface_contact_points = False
+            if object_verts is not None:
+                contact_points, contact_offsets, contact_mask = compute_contact_annotations(
+                    hand_pos,
+                    np.asarray(object_verts, dtype=np.float32),
+                    self.contact_threshold,
+                )
+                has_surface_contact_points = contact_points is not None
+            if contact_points is None and has_object:
+                obj_pos_arr = np.asarray(data["object_pos"], dtype=np.float32)
+                if obj_pos_arr.shape[0] != T:
+                    if obj_pos_arr.shape[0] > T:
+                        obj_pos_arr = obj_pos_arr[:T]
+                    else:
+                        base = obj_pos_arr[-1:] if obj_pos_arr.shape[0] > 0 else np.zeros((1, 3), dtype=np.float32)
+                        pad = np.repeat(base, T - obj_pos_arr.shape[0], axis=0)
+                        obj_pos_arr = np.concatenate([obj_pos_arr, pad], axis=0)
+                contact_points = np.repeat(obj_pos_arr[:, None, :], 2, axis=1).reshape(T, 6)
+                contact_offsets = hand_pos - contact_points
+                contact_mask = np.zeros((T, 2), dtype=np.float32)
+                contact_label = data.get("contact")
+                if contact_label is not None:
+                    contact_label = np.asarray(contact_label).reshape(-1)
+                    if contact_label.shape[0] >= T:
+                        d_left = np.linalg.norm(hand_pos[:, :3] - obj_pos_arr, axis=-1)
+                        d_right = np.linalg.norm(hand_pos[:, 3:] - obj_pos_arr, axis=-1)
+                        nearest_right = d_right < d_left
+                        active = contact_label[:T] > 0
+                        contact_mask[active & ~nearest_right, 0] = 1.0
+                        contact_mask[active & nearest_right, 1] = 1.0
+            if contact_points is None:
+                contact_points = np.zeros_like(hand_pos, dtype=np.float32)
+                contact_offsets = np.zeros_like(hand_pos, dtype=np.float32)
+                contact_mask = np.zeros((T, 2), dtype=np.float32)
+            data_proc["contact_points"] = contact_points
+            data_proc["contact_offsets"] = contact_offsets
+            data_proc["contact_mask"] = contact_mask
+            data_proc["contact_distance_mask"] = (
+                contact_mask if has_surface_contact_points else np.zeros((T, 2), dtype=np.float32)
+            )
+        else:
+            data_proc["contact_points"] = None
+            data_proc["contact_offsets"] = None
+            data_proc["contact_mask"] = None
+            data_proc["contact_distance_mask"] = None
 
         if self.preload:
             self._file_cache[file_idx] = data_proc
@@ -247,10 +319,27 @@ class HFHandMotionDataset(Dataset):
             "hand_positions": hand_t,       # (T, 6)
             "object_features": obj_t,       # (T, 15)
             "seq_name": data["seq_name"],
+            "object_name": data["object_name"],
             "fps": data["fps"],
             "file_idx": fi,
             "start": start,
+            **(
+                {
+                    "contact_points": torch.from_numpy(data["contact_points"][start:end]).float(),
+                    "contact_offsets": torch.from_numpy(data["contact_offsets"][start:end]).float(),
+                    "contact_mask": torch.from_numpy(data["contact_mask"][start:end]).float(),
+                    "contact_distance_mask": torch.from_numpy(data["contact_distance_mask"][start:end]).float(),
+                }
+                if self.include_contact_data and data["contact_points"] is not None
+                else {}
+            ),
         }
+
+    def get_window_object_names(self) -> List[str]:
+        return [
+            self._load_file(file_idx, self.file_paths[file_idx]).get("object_name", "unknown")
+            for file_idx, _ in self.windows
+        ]
 
     def denormalize_hands(self, hand_positions: torch.Tensor) -> torch.Tensor:
         if self.hand_mean is None:
@@ -295,6 +384,9 @@ class HFFullBodyDataset(Dataset):
         hand_mean: Optional[torch.Tensor] = None,
         hand_std: Optional[torch.Tensor] = None,
         normalize_hands: bool = False,
+        hand_condition_dir: Optional[str] = None,
+        hand_condition_key: str = "hand_positions",
+        require_hand_condition: bool = False,
     ):
         super().__init__()
         self.root_dir = root_dir
@@ -303,6 +395,9 @@ class HFFullBodyDataset(Dataset):
         self.min_seq_len = min_seq_len
         self.preload = preload
         self.normalize_hands = normalize_hands
+        self.hand_condition_dir = hand_condition_dir
+        self.hand_condition_key = hand_condition_key
+        self.require_hand_condition = require_hand_condition
 
         self.state_mean = state_mean
         self.state_std = state_std
@@ -326,12 +421,16 @@ class HFFullBodyDataset(Dataset):
         # Build windows
         self.windows: List[Tuple[int, int]] = []
         self._file_cache: Dict[int, Dict[str, Any]] = {}
+        self.file_object_names: List[str] = []
 
         for fi, path in enumerate(self.file_paths):
             data = self._load_file(fi, path)
+            self.file_object_names.append(
+                data.get("object_name", "unknown") if data is not None else "unknown"
+            )
             if data is None:
                 continue
-            T = data["root_pos"].shape[0]
+            T = min(data["root_pos"].shape[0], data["cond_hand_positions"].shape[0])
             if T < self.min_seq_len or T < self.window_size:
                 continue
             for start in range(0, T - self.window_size + 1, self.stride):
@@ -362,12 +461,48 @@ class HFFullBodyDataset(Dataset):
                 print(f"Warning: Missing '{key}' in {path}")
                 return None
 
+        seq_name = data.get("seq_name", os.path.splitext(os.path.basename(path))[0])
+        hand_positions = np.asarray(data["hand_positions"], dtype=np.float32)
+        cond_hand_positions = hand_positions
+        if self.hand_condition_dir:
+            cond_path = os.path.join(self.hand_condition_dir, os.path.basename(path))
+            if os.path.exists(cond_path):
+                try:
+                    with open(cond_path, "rb") as f:
+                        cond_data = pickle.load(f)
+                    cond_values = cond_data.get(self.hand_condition_key)
+                    if cond_values is None and self.hand_condition_key != "hand_positions":
+                        cond_values = cond_data.get("hand_positions")
+                    if cond_values is None:
+                        print(
+                            f"Warning: Missing hand condition key '{self.hand_condition_key}' in {cond_path}"
+                        )
+                        if self.require_hand_condition:
+                            return None
+                    else:
+                        cond_hand_positions = np.asarray(cond_values, dtype=np.float32)
+                except Exception as e:
+                    print(f"Warning: Could not load hand condition {cond_path}: {e}")
+                    if self.require_hand_condition:
+                        return None
+            elif self.require_hand_condition:
+                print(f"Warning: Missing hand condition file {cond_path}")
+                return None
+
+        if cond_hand_positions.ndim != 2 or cond_hand_positions.shape[1] != 6:
+            print(f"Warning: Invalid hand condition shape in {path}")
+            if self.require_hand_condition:
+                return None
+            cond_hand_positions = hand_positions
+
         data_proc = {
             "root_pos": np.asarray(data["root_pos"], dtype=np.float32),
             "root_rot": np.asarray(data["root_rot"], dtype=np.float32),
             "dof_pos": np.asarray(data["dof_pos"], dtype=np.float32),
-            "hand_positions": np.asarray(data["hand_positions"], dtype=np.float32),
-            "seq_name": data.get("seq_name", os.path.splitext(os.path.basename(path))[0]),
+            "hand_positions": hand_positions,
+            "cond_hand_positions": cond_hand_positions,
+            "seq_name": seq_name,
+            "object_name": object_name_from_data(data, path),
             "fps": float(data.get("fps", 30.0)),
         }
 
@@ -391,7 +526,7 @@ class HFFullBodyDataset(Dataset):
             root_pos = data["root_pos"][start:end]
             root_rot = data["root_rot"][start:end]
             dof_pos = data["dof_pos"][start:end]
-            hand_pos = data["hand_positions"][start:end]
+            hand_pos = data["cond_hand_positions"][start:end]
 
             # Convert root_rot to 6D
             root_rot_6d = quat_to_rot6d_xyzw(
@@ -428,7 +563,7 @@ class HFFullBodyDataset(Dataset):
         root_pos = data["root_pos"][start:end]
         root_rot = data["root_rot"][start:end]
         dof_pos = data["dof_pos"][start:end]
-        hand_pos = data["hand_positions"][start:end]
+        hand_pos = data["cond_hand_positions"][start:end]
 
         # Convert root rotation to 6D
         root_rot_6d = quat_to_rot6d_xyzw(
@@ -450,10 +585,17 @@ class HFFullBodyDataset(Dataset):
             "state": state_t,      # (T, 38)
             "cond": hand_t,        # (T, 6)
             "seq_name": data["seq_name"],
+            "object_name": data["object_name"],
             "fps": data["fps"],
             "file_idx": fi,
             "start": start,
         }
+
+    def get_window_object_names(self) -> List[str]:
+        return [
+            self._load_file(file_idx, self.file_paths[file_idx]).get("object_name", "unknown")
+            for file_idx, _ in self.windows
+        ]
 
     def denormalize_state(self, state: torch.Tensor) -> torch.Tensor:
         if self.state_mean is None:

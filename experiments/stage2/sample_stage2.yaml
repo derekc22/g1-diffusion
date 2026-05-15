@@ -20,11 +20,3 @@ sample:
   # If set, generates motion of this length (in frames) instead of full object motion length
   # Set to null or omit to use full object motion length
   partial_motion_length: 120
-
-dataset:
-  window_size: 120
-  stride: 10
-  min_seq_len: 32
-  train: false
-  train_split: 0.9
-  preload: false

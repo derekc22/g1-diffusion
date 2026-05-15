@@ -51,6 +51,8 @@ from utils.inference_optimization import (
 from utils.contact_constraints import apply_contact_constraints, ContactConstraintProcessor
 from utils.rotation import rot6d_to_quat_xyzw, mat_to_quat_xyzw
 from utils.general import load_config
+from utils.motion_postprocess import smooth_body_motion_np
+from utils.robot_kinematics import apply_robot_contact_root_correction, robot_hand_positions
 from utils.object_conditioning import (
     apply_temporal_conditioning_variant,
     describe_object_conditioning_variant,
@@ -127,10 +129,30 @@ class OptimizedHFPipeline:
         config: InferenceConfig,
         device: str = "cuda:0",
         contact_threshold: float = 0.03,
+        body_smooth_strength: float = 0.0,
+        body_smooth_window: int = 5,
+        body_smooth_iterations: int = 1,
+        robot_contact_correction: bool = False,
+        robot_contact_activation_threshold: float = 0.12,
+        robot_contact_max_translation: float = 0.08,
+        robot_contact_smooth_strength: float = 0.55,
+        robot_contact_smooth_window: int = 9,
+        robot_contact_smooth_iterations: int = 2,
+        allow_full_length: bool = False,
     ):
         self.device = torch.device(device)
         self.config = config
         self.contact_threshold = contact_threshold
+        self.body_smooth_strength = float(body_smooth_strength)
+        self.body_smooth_window = int(body_smooth_window)
+        self.body_smooth_iterations = int(body_smooth_iterations)
+        self.robot_contact_correction = bool(robot_contact_correction)
+        self.robot_contact_activation_threshold = float(robot_contact_activation_threshold)
+        self.robot_contact_max_translation = float(robot_contact_max_translation)
+        self.robot_contact_smooth_strength = float(robot_contact_smooth_strength)
+        self.robot_contact_smooth_window = int(robot_contact_smooth_window)
+        self.robot_contact_smooth_iterations = int(robot_contact_smooth_iterations)
+        self.allow_full_length = bool(allow_full_length)
 
         # Determine dtype
         if config.precision == PrecisionMode.FP16:
@@ -284,12 +306,29 @@ class OptimizedHFPipeline:
         norm = {
             "state_mean": norm_stats.get("state_mean"),
             "state_std": norm_stats.get("state_std"),
+            "hand_mean": norm_stats.get("hand_mean"),
+            "hand_std": norm_stats.get("hand_std"),
+            "normalize_hands": dataset_cfg.get("normalize_hands", False),
         }
         if norm["state_mean"] is not None:
             norm["state_mean"] = norm["state_mean"].to(self.device)
             norm["state_std"] = norm["state_std"].to(self.device)
+        if norm["hand_mean"] is not None:
+            norm["hand_mean"] = norm["hand_mean"].to(self.device)
+            norm["hand_std"] = norm["hand_std"].to(self.device)
 
         return model, timesteps, norm, max_len, state_dim
+
+    def _prepare_stage2_condition(self, hands: torch.Tensor) -> torch.Tensor:
+        if not self.stage2_norm.get("normalize_hands", False):
+            return hands
+        hand_mean = self.stage2_norm.get("hand_mean")
+        hand_std = self.stage2_norm.get("hand_std")
+        if hand_mean is None or hand_std is None:
+            return hands
+        mean = hand_mean.to(device=hands.device, dtype=hands.dtype).view(1, 1, -1)
+        std = hand_std.to(device=hands.device, dtype=hands.dtype).view(1, 1, -1)
+        return (hands - mean) / std
 
     def _apply_optimizations(self):
         """Apply precision and compilation optimizations."""
@@ -485,6 +524,7 @@ class OptimizedHFPipeline:
         object_features: np.ndarray,
         object_verts: Optional[np.ndarray] = None,
         object_rotation: Optional[np.ndarray] = None,
+        contact_labels: Optional[np.ndarray] = None,
         apply_constraints: bool = True,
         partial_motion_length: Optional[int] = None,
     ) -> Dict[str, np.ndarray]:
@@ -516,18 +556,27 @@ class OptimizedHFPipeline:
                     object_verts = object_verts[:partial_motion_length]
                 if object_rotation is not None:
                     object_rotation = object_rotation[:partial_motion_length]
+                if contact_labels is not None:
+                    contact_labels = contact_labels[:partial_motion_length]
                 partial = True
                 target_len = partial_motion_length
 
         T_working = object_features.shape[0]
-        if T_working > max_len:
+        if T_working > max_len and not self.allow_full_length:
             print(f"  Warning: Truncating from {T_working} to {max_len} frames")
             object_features = object_features[:max_len]
             if object_verts is not None:
                 object_verts = object_verts[:max_len]
             if object_rotation is not None:
                 object_rotation = object_rotation[:max_len]
+            if contact_labels is not None:
+                contact_labels = contact_labels[:max_len]
             truncated = True
+        elif T_working > max_len:
+            print(
+                f"  Warning: Running full length {T_working} frames "
+                f"past checkpoint max_len={max_len}"
+            )
 
         object_features = apply_temporal_conditioning_variant(
             object_features,
@@ -559,7 +608,7 @@ class OptimizedHFPipeline:
         # =====================================================================
         if apply_constraints and object_verts is not None and object_rotation is not None:
             hands_rect_np, contact_meta = self.contact_processor.process(
-                hands_raw_np, object_verts, object_rotation
+                hands_raw_np, object_verts, object_rotation, contact_labels=contact_labels
             )
         else:
             hands_rect_np = hands_raw_np
@@ -569,11 +618,12 @@ class OptimizedHFPipeline:
         # Stage 2: Hand positions → Full-body motion
         # =====================================================================
         hands_rect = torch.from_numpy(hands_rect_np).to(device=self.device, dtype=self.dtype).unsqueeze(0)
+        stage2_cond = self._prepare_stage2_condition(hands_rect)
 
         if use_fast:
-            state_norm = self._sample_stage2_fast(hands_rect)
+            state_norm = self._sample_stage2_fast(stage2_cond)
         else:
-            state_norm = self._sample_stage2_ddpm(hands_rect)
+            state_norm = self._sample_stage2_ddpm(stage2_cond)
 
         state = self._denormalize(
             state_norm,
@@ -589,11 +639,41 @@ class OptimizedHFPipeline:
 
         root_rot_6d_t = torch.from_numpy(root_rot_6d).float()
         root_rot_quat = rot6d_to_quat_xyzw(root_rot_6d_t).numpy()
+        root_pos, root_rot_quat, dof_pos = smooth_body_motion_np(
+            root_pos,
+            root_rot_quat,
+            dof_pos,
+            strength=self.body_smooth_strength,
+            window=self.body_smooth_window,
+            iterations=self.body_smooth_iterations,
+        )
+
+        robot_contact_metadata = None
+        if self.robot_contact_correction:
+            root_pos_corrected, robot_contact_metadata = apply_robot_contact_root_correction(
+                root_pos=root_pos,
+                root_rot_xyzw=root_rot_quat,
+                dof_pos=dof_pos,
+                target_hands=hands_rect_np,
+                object_verts=object_verts,
+                contact_threshold=self.contact_threshold,
+                activation_threshold=self.robot_contact_activation_threshold,
+                max_translation=self.robot_contact_max_translation,
+                smooth_strength=self.robot_contact_smooth_strength,
+                smooth_window=self.robot_contact_smooth_window,
+                smooth_iterations=self.robot_contact_smooth_iterations,
+            )
+            root_pos = root_pos_corrected
+            state_np[:, :3] = root_pos
+
+        robot_hands = robot_hand_positions(root_pos, root_rot_quat, dof_pos)
 
         return {
             "hands_raw": hands_raw_np,
             "hands_rectified": hands_rect_np,
             "contact_metadata": contact_meta,
+            "robot_hands": robot_hands,
+            "robot_contact_metadata": robot_contact_metadata,
             "state": state_np,
             "root_pos": root_pos,
             "root_rot": root_rot_quat,
@@ -688,10 +768,7 @@ def main():
     if "logs" in ckpt_parts and "checkpoints" in ckpt_parts:
         logs_idx = ckpt_parts.index("logs")
         log_id = ckpt_parts[logs_idx + 1]
-        dataset_yml = yml.get("dataset", {})
-        window_size = dataset_yml.get("window_size", 120)
-        stride = dataset_yml.get("stride", 10)
-        sample_folder = f"opt_{opt_config.sampler.value}{opt_config.num_inference_steps}_{opt_config.precision.value}_w{window_size}_s{stride}_{timestamp}{suffix}"
+        sample_folder = f"opt_{opt_config.sampler.value}{opt_config.num_inference_steps}_{opt_config.precision.value}_{timestamp}{suffix}"
         output_dir = os.path.join("logs", log_id, "samples", sample_folder)
     else:
         output_dir = os.path.join("out", "stage2_hf_optimized", timestamp)
@@ -713,17 +790,33 @@ def main():
         config=opt_config,
         device=device_str,
         contact_threshold=contact_threshold,
+        body_smooth_strength=sample_yml.get("body_smooth_strength", 0.0),
+        body_smooth_window=sample_yml.get("body_smooth_window", 5),
+        body_smooth_iterations=sample_yml.get("body_smooth_iterations", 1),
+        robot_contact_correction=sample_yml.get("robot_contact_correction", False),
+        robot_contact_activation_threshold=sample_yml.get("robot_contact_activation_threshold", 0.12),
+        robot_contact_max_translation=sample_yml.get("robot_contact_max_translation", 0.08),
+        robot_contact_smooth_strength=sample_yml.get("robot_contact_smooth_strength", 0.55),
+        robot_contact_smooth_window=sample_yml.get("robot_contact_smooth_window", 9),
+        robot_contact_smooth_iterations=sample_yml.get("robot_contact_smooth_iterations", 2),
+        allow_full_length=sample_yml.get("allow_full_length", False),
     )
-
-    # Warmup
-    dataset_yml = yml.get("dataset", {})
-    seq_len = dataset_yml.get("window_size", 120)
-    pipeline.warmup(seq_len=seq_len)
 
     # Find input files
     files = sorted(glob.glob(os.path.join(root_dir, "*.pkl")))
     if num_samples:
         files = files[:num_samples]
+
+    # Warmup with the first actual input length so sample YAMLs do not carry fake dataset settings.
+    if files:
+        with open(files[0], "rb") as f:
+            warmup_data = pickle.load(f)
+        obj_feat = _build_object_features(warmup_data)
+        if obj_feat is not None:
+            seq_len = obj_feat.shape[0]
+        else:
+            seq_len = warmup_data.get("hand_positions", warmup_data.get("dof_pos")).shape[0]
+        pipeline.warmup(seq_len=seq_len)
 
     print(f"\nProcessing {len(files)} files")
     print(f"Output directory: {output_dir}")
@@ -752,6 +845,7 @@ def main():
             object_features=obj_feat,
             object_verts=data.get("object_verts"),
             object_rotation=data.get("object_rotation"),
+            contact_labels=data.get("contact"),
             apply_constraints=apply_constraints,
             partial_motion_length=partial_motion_length,
         )
