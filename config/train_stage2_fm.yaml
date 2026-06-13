@@ -14,7 +14,7 @@ train:
   device: "cuda:0"
   architecture: "transformer"  # or "mlp"
   save_dir: "./logs"
-  save_every: 100
+  save_every: 25
 
   # Flow matching specific
   generative_model: "flow_matching"

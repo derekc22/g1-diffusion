@@ -59,6 +59,25 @@ from utils.object_conditioning import (
     normalize_object_conditioning_variant,
 )
 
+
+def _stage2_contact_dim_from_checkpoint(
+    model_cfg: Dict[str, Any], state_dict: Dict[str, torch.Tensor]
+) -> int:
+    contact_dim = int(model_cfg.get("contact_dim", 0))
+    if contact_dim > 0:
+        return contact_dim
+    if "contact_head.weight" in state_dict:
+        return int(state_dict["contact_head.weight"].shape[0])
+    contact_weights = [
+        value
+        for key, value in state_dict.items()
+        if key.startswith("contact_mlp.") and key.endswith(".weight") and value.ndim == 2
+    ]
+    if contact_weights:
+        return int(contact_weights[-1].shape[0])
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Compatibility shim for pickles created by NumPy >= 2.0
 # ---------------------------------------------------------------------------
@@ -270,6 +289,7 @@ class OptimizedHFPipeline:
         max_len = model_cfg.get("max_len", window_size + 100)
 
         state_dict = ckpt["model"]
+        contact_dim = _stage2_contact_dim_from_checkpoint(model_cfg, state_dict)
         if "out_proj.weight" in state_dict:
             state_dim = state_dict["out_proj.weight"].shape[0]
         else:
@@ -287,6 +307,7 @@ class OptimizedHFPipeline:
                 dim_feedforward=model_cfg.get("dim_feedforward", 512),
                 dropout=model_cfg.get("dropout", 0.1),
                 max_len=max_len,
+                contact_dim=contact_dim,
             )
         else:
             model = Stage2MLPModel(
@@ -294,6 +315,7 @@ class OptimizedHFPipeline:
                 cond_dim=cond_dim,
                 hidden_dim=model_cfg.get("mlp_hidden", 512),
                 num_layers=model_cfg.get("mlp_layers", 4),
+                contact_dim=contact_dim,
             )
 
         model.load_state_dict(ckpt["model"])
@@ -525,7 +547,6 @@ class OptimizedHFPipeline:
         object_verts: Optional[np.ndarray] = None,
         object_rotation: Optional[np.ndarray] = None,
         contact_labels: Optional[np.ndarray] = None,
-        apply_constraints: bool = True,
         partial_motion_length: Optional[int] = None,
     ) -> Dict[str, np.ndarray]:
         """
@@ -535,7 +556,6 @@ class OptimizedHFPipeline:
             object_features: (T, 15) object motion features
             object_verts: (T, K, 3) object vertices (for contact constraints)
             object_rotation: (T, 3, 3) object rotations (for contact constraints)
-            apply_constraints: Whether to apply contact constraints
             partial_motion_length: If set, generate this many frames
 
         Returns:
@@ -606,7 +626,7 @@ class OptimizedHFPipeline:
         # =====================================================================
         # Contact Constraints
         # =====================================================================
-        if apply_constraints and object_verts is not None and object_rotation is not None:
+        if object_verts is not None and object_rotation is not None:
             hands_rect_np, contact_meta = self.contact_processor.process(
                 hands_raw_np, object_verts, object_rotation, contact_labels=contact_labels
             )
@@ -738,7 +758,6 @@ def main():
     stage1_ckpt_path = sample_yml["stage1_ckpt_path"]
     stage2_ckpt_path = sample_yml["stage2_ckpt_path"]
     device_str = sample_yml.get("device", "cuda")
-    apply_constraints = sample_yml.get("apply_constraints", True)
     contact_threshold = sample_yml.get("contact_threshold", 0.03)
     num_samples = sample_yml.get("num_samples", None)
     seed = sample_yml.get("seed", 42)
@@ -846,7 +865,6 @@ def main():
             object_verts=data.get("object_verts"),
             object_rotation=data.get("object_rotation"),
             contact_labels=data.get("contact"),
-            apply_constraints=apply_constraints,
             partial_motion_length=partial_motion_length,
         )
         elapsed = time.perf_counter() - start_time

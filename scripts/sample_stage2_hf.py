@@ -149,6 +149,7 @@ class HFPipeline:
         arch = config.get("train", {}).get("architecture", "transformer")
         model_cfg = config.get("model", {})
         dataset_cfg = config.get("dataset", {})
+        contact_dim = int(model_cfg.get("contact_dim", 0))
         self.stage1_checkpoint_variant = normalize_object_conditioning_variant(
             dataset_cfg.get("object_conditioning_variant", "variant0")
         )
@@ -239,6 +240,7 @@ class HFPipeline:
                 dim_feedforward=model_cfg.get("dim_feedforward", 512),
                 dropout=model_cfg.get("dropout", 0.1),
                 max_len=max_len,
+                contact_dim=contact_dim,
             )
         else:
             model = Stage2MLPModel(
@@ -246,6 +248,7 @@ class HFPipeline:
                 cond_dim=cond_dim,
                 hidden_dim=model_cfg.get("mlp_hidden", 512),
                 num_layers=model_cfg.get("mlp_layers", 4),
+                contact_dim=contact_dim,
             )
 
         model.load_state_dict(ckpt["model"])
@@ -340,7 +343,6 @@ class HFPipeline:
         object_verts: Optional[np.ndarray] = None,
         object_rotation: Optional[np.ndarray] = None,
         contact_labels: Optional[np.ndarray] = None,
-        apply_constraints: bool = True,
         partial_motion_length: Optional[int] = None,
     ) -> Dict[str, np.ndarray]:
         """
@@ -350,7 +352,6 @@ class HFPipeline:
             object_features: (T, 15) object motion features
             object_verts: (T, K, 3) object vertices (for contact constraints)
             object_rotation: (T, 3, 3) object rotations (for contact constraints)
-            apply_constraints: Whether to apply contact constraints
             partial_motion_length: If set, generate this many frames instead of full length
 
         Returns:
@@ -421,7 +422,7 @@ class HFPipeline:
         # =====================================================================
         # Apply Contact Constraints
         # =====================================================================
-        if apply_constraints and object_verts is not None and object_rotation is not None:
+        if object_verts is not None and object_rotation is not None:
             hands_rect_np, contact_meta = self.contact_processor.process(
                 hands_raw_np, object_verts, object_rotation, contact_labels=contact_labels
             )
@@ -503,7 +504,6 @@ def main():
     stage1_ckpt_path = sample_yml["stage1_ckpt_path"]
     stage2_ckpt_path = sample_yml["stage2_ckpt_path"]
     device_str = sample_yml.get("device", "cuda")
-    apply_constraints = sample_yml.get("apply_constraints", True)
     contact_threshold = sample_yml.get("contact_threshold", 0.03)
     num_samples = sample_yml.get("num_samples", None)
     seed = sample_yml.get("seed", 42)
@@ -609,7 +609,6 @@ def main():
             object_verts=data.get("object_verts"),
             object_rotation=data.get("object_rotation"),
             contact_labels=data.get("contact"),
-            apply_constraints=apply_constraints,
             partial_motion_length=partial_motion_length,
         )
         elapsed = time.perf_counter() - start_time

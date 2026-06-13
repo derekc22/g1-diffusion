@@ -3,7 +3,7 @@
 root_dir: "./data/hf_bps_preprocessed"
 
 train:
-  batch_size: 128
+  batch_size: 64
   num_epochs: 10000
   lr: 1e-4
   timesteps: 1000
@@ -14,14 +14,15 @@ train:
   exp_prefix: "stage1_hf_bps"
 
 dataset:
-  window_size: 120
+  window_size: 300
   stride: 10
   min_seq_len: 30
-  train_split: 0.9
+  train_split: 0.99
   preload: true
   object_conditioning_variant: "variant0"
 
 model:
+  max_len: 300
   encoder_hidden: 512
   encoder_layers: 3
   object_feature_dim: 256

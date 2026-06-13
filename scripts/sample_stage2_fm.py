@@ -74,7 +74,6 @@ def main():
     stage1_ckpt_path = sample_yml["stage1_ckpt_path"]
     stage2_ckpt_path = sample_yml["stage2_ckpt_path"]
     device = sample_yml["device"]
-    apply_constraints = sample_yml.get("apply_constraints", True)
     contact_threshold = sample_yml.get("contact_threshold", 0.03)
     num_samples = sample_yml.get("num_samples", None)
     seed = sample_yml.get("seed", 42)
@@ -151,7 +150,6 @@ def main():
             object_centroid=data["object_centroid"],
             object_verts=data.get("object_verts"),
             object_rotation=data.get("object_rotation"),
-            apply_constraints=apply_constraints,
             partial_motion_length=partial_motion_length,
         )
         elapsed = time.perf_counter() - start_time

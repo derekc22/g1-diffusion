@@ -185,7 +185,7 @@ def main():
             num_transformer_layers=model_yml["num_layers"],
             dim_feedforward=model_yml["dim_feedforward"],
             dropout=model_yml["dropout"],
-            max_len=window_size + 100,
+            max_len=model_yml.get("max_len", window_size + 100),
         ).to(device)
     else:
         model = Stage1HandDiffusionMLP(

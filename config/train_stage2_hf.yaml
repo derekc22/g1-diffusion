@@ -6,26 +6,35 @@
 #
 # Uses the same Stage2TransformerModel as the original pipeline.
 
-root_dir: "./data/hf_preprocessed"
+root_dir: "./data/hf_bps_preprocessed"
 
 train:
-  batch_size: 128
+  batch_size: 32
   num_epochs: 10000
-  lr: 1e-4
+  lr: 5e-6
   timesteps: 1000       # DDPM diffusion timesteps
   device: "cuda:0"
   architecture: "transformer"  # or "mlp"
   save_dir: "./logs"
-  save_every: 100        # Save checkpoint every N epochs
+  save_every: 100       # Save checkpoint every N epochs
+  init_ckpt_path: "/home/learning/Documents/g1-diffusion/logs/stage2_hf_e10000_b32_lr5e-06_ts1000_w300_s10_transformer_2026Jun10_22-06-31/checkpoints/stage2_hf_epoch_002089.pt"
+  resume_optimizer: false
 
 dataset:
-  window_size: 120       # Frames per window (4 seconds at 30fps)
+  window_size: 300       # Long HF-BPS horizon without pushing all the way to max source length
   stride: 10             # Window stride
   min_seq_len: 30        # Minimum sequence length
   train_split: 0.99      # Train/validation split ratio
   preload: true          # Preload all data into memory
+  object_contact_sigma: 0.05
+  floor_contact_sigma: 0.04
+  contact_eps: 0.2
+  stick_speed_threshold: 0.04
 
 model:
+  contact_dim: 4
+  max_len: 300
+
   # MLP denoiser (used when train.architecture: "mlp")
   mlp_hidden: 512
   mlp_layers: 4
@@ -43,3 +52,15 @@ loss:
   acceleration_weight: 0.1
   smooth_acceleration_weight: 0.02
   smooth_jerk_weight: 0.005
+  robot_hand_weight: 8.0
+  robot_hand_contact_weight: 12.0
+  robot_hand_contact_margin: 0.12
+  contact_state_weight: 0.01
+  object_contact_dist_weight: 0.50
+  floor_contact_dist_weight: 0.10
+  contact_velocity_weight: 0.10
+  foot_slide_weight: 0.05
+  floor_penetration_weight: 0.30
+  support_weight: 0.0
+  geometric_warmup_steps: 1000
+  floor_height: 0.0

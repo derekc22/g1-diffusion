@@ -10,7 +10,7 @@ train:
   device: "cuda:0"
   architecture: "transformer"
   save_dir: "./logs"
-  save_every: 100
+  save_every: 25
   exp_prefix: "stage1_hf_bps"
 
 dataset:

@@ -10,7 +10,7 @@ train:
   device: "cuda:0"
   architecture: "transformer"
   save_dir: "./logs"
-  save_every: 100
+  save_every: 25
   generative_model: "flow_matching"
   sigma_min: 1e-4
   num_inference_steps: 50

@@ -25,7 +25,12 @@ if "numpy._core.umath" not in sys.modules:
     sys.modules["numpy._core.umath"] = np.core.umath
 
 from utils.contact_constraints import compute_contact_metrics, compute_hand_jpe
-from utils.robot_kinematics import compute_robot_contact_report, robot_hand_positions
+from utils.robot_kinematics import (
+    compute_robot_contact_report,
+    compute_robot_motion_quality_report,
+    robot_hand_positions,
+    robot_foot_proxy_positions,
+)
 
 
 def nearest_surface_distances(hands, object_verts):
@@ -46,7 +51,66 @@ def parse_generated_fps(sample_dir):
     return float(match.group(1)) if match else None
 
 
-def evaluate(sample_dir, source_dir, contact_threshold):
+def compute_foot_contact_report(
+    pred_root_pos,
+    pred_root_rot,
+    pred_dof_pos,
+    gt_root_pos,
+    gt_root_rot,
+    gt_dof_pos,
+    floor_height,
+    contact_height_threshold,
+):
+    T = min(
+        len(pred_root_pos),
+        len(pred_root_rot),
+        len(pred_dof_pos),
+        len(gt_root_pos),
+        len(gt_root_rot),
+        len(gt_dof_pos),
+    )
+    if T == 0:
+        return {
+            "foot_contact_precision": 0.0,
+            "foot_contact_recall": 0.0,
+            "foot_contact_f1": 0.0,
+            "foot_floating_frac": 0.0,
+        }
+
+    pred_feet = robot_foot_proxy_positions(
+        np.asarray(pred_root_pos[:T], dtype=np.float32),
+        np.asarray(pred_root_rot[:T], dtype=np.float32),
+        np.asarray(pred_dof_pos[:T], dtype=np.float32),
+    )
+    gt_feet = robot_foot_proxy_positions(
+        np.asarray(gt_root_pos[:T], dtype=np.float32),
+        np.asarray(gt_root_rot[:T], dtype=np.float32),
+        np.asarray(gt_dof_pos[:T], dtype=np.float32),
+    )
+    pred_contact = pred_feet[..., 2].min(axis=2) <= float(floor_height) + float(contact_height_threshold)
+    gt_contact = gt_feet[..., 2].min(axis=2) <= float(floor_height) + float(contact_height_threshold)
+    tp = np.sum(pred_contact & gt_contact)
+    fp = np.sum(pred_contact & ~gt_contact)
+    fn = np.sum(~pred_contact & gt_contact)
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1 = 2.0 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+    return {
+        "foot_contact_precision": float(precision),
+        "foot_contact_recall": float(recall),
+        "foot_contact_f1": float(f1),
+        "foot_floating_frac": float(np.mean((~pred_contact) & gt_contact)),
+    }
+
+
+def evaluate(
+    sample_dir,
+    source_dir,
+    contact_threshold,
+    floor_height,
+    stance_height_threshold,
+    stance_speed_threshold,
+):
     rows = []
     for sample_path in sorted(glob.glob(os.path.join(sample_dir, "*.pkl"))):
         name = os.path.basename(sample_path)
@@ -99,16 +163,42 @@ def evaluate(sample_dir, source_dir, contact_threshold):
             )
         if robot_hands is not None:
             robot_hands = np.asarray(robot_hands, dtype=np.float32)[:T]
+            root_pos = np.asarray(sample["root_pos"][:T], dtype=np.float32)
+            root_rot = np.asarray(sample["root_rot"][:T], dtype=np.float32)
+            dof_pos = np.asarray(sample["dof_pos"][:T], dtype=np.float32)
             robot_report = compute_robot_contact_report(
-                np.asarray(sample["root_pos"][:T], dtype=np.float32),
-                np.asarray(sample["root_rot"][:T], dtype=np.float32),
-                np.asarray(sample["dof_pos"][:T], dtype=np.float32),
+                root_pos,
+                root_rot,
+                dof_pos,
                 target_hands=target_hands,
                 gt_hands=gt_hands,
                 object_verts=object_verts,
                 contact_threshold=contact_threshold,
             )
             row.update(robot_report)
+            row.update(
+                compute_robot_motion_quality_report(
+                    root_pos,
+                    root_rot,
+                    dof_pos,
+                    floor_height=floor_height,
+                    stance_height_threshold=stance_height_threshold,
+                    stance_speed_threshold=stance_speed_threshold,
+                )
+            )
+            if all(key in source for key in ("root_pos", "root_rot", "dof_pos")):
+                row.update(
+                    compute_foot_contact_report(
+                        root_pos,
+                        root_rot,
+                        dof_pos,
+                        np.asarray(source["root_pos"][:T], dtype=np.float32),
+                        np.asarray(source["root_rot"][:T], dtype=np.float32),
+                        np.asarray(source["dof_pos"][:T], dtype=np.float32),
+                        floor_height=floor_height,
+                        contact_height_threshold=stance_height_threshold,
+                    )
+                )
             robot_acc = np.diff(robot_hands, n=2, axis=0)
             row["robot_acc_rms_cm"] = (
                 float(np.sqrt((robot_acc ** 2).mean()) * 100.0) if len(robot_hands) > 2 else 0.0
@@ -123,9 +213,19 @@ def main():
     parser.add_argument("--sample_dir", required=True)
     parser.add_argument("--source_dir", default="./data/hf_bps_preprocessed")
     parser.add_argument("--contact_threshold", type=float, default=0.05)
+    parser.add_argument("--floor_height", type=float, default=0.0)
+    parser.add_argument("--stance_height_threshold", type=float, default=0.06)
+    parser.add_argument("--stance_speed_threshold", type=float, default=0.04)
     args = parser.parse_args()
 
-    rows = evaluate(args.sample_dir, args.source_dir, args.contact_threshold)
+    rows = evaluate(
+        args.sample_dir,
+        args.source_dir,
+        args.contact_threshold,
+        args.floor_height,
+        args.stance_height_threshold,
+        args.stance_speed_threshold,
+    )
     if not rows:
         raise RuntimeError(f"No comparable HF-BPS samples found in {args.sample_dir}")
 
@@ -146,6 +246,20 @@ def main():
         "robot_surface_mean_cm",
         "robot_surface_p90_cm",
         "robot_acc_rms_cm",
+        "root_acc_rms_cm",
+        "root_jerk_rms_cm",
+        "state_acc_rms",
+        "state_jerk_rms",
+        "dof_acc_rms",
+        "dof_jerk_rms",
+        "foot_penetration_mean_cm",
+        "foot_penetration_max_cm",
+        "foot_below_floor_frac",
+        "foot_slide_cm",
+        "foot_contact_f1",
+        "foot_contact_precision",
+        "foot_contact_recall",
+        "foot_floating_frac",
     ]
     keys = [key for key in candidate_keys if key in rows[0]]
     avg = {key: float(np.mean([row[key] for row in rows])) for key in keys}
@@ -174,6 +288,21 @@ def main():
                     f"robot_f1={row['robot_contact_f1']:.3f}",
                     f"robot_p90_cm={row['robot_surface_p90_cm']:.3f}",
                     f"robot_to_target_cm={row['robot_to_target_hand_jpe_cm']:.3f}",
+                ]
+            )
+        if "root_jerk_rms_cm" in row:
+            parts.extend(
+                [
+                    f"root_jerk_cm={row['root_jerk_rms_cm']:.3f}",
+                    f"foot_pen_max_cm={row['foot_penetration_max_cm']:.3f}",
+                    f"foot_slide_cm={row['foot_slide_cm']:.3f}",
+                ]
+            )
+        if "foot_contact_f1" in row:
+            parts.extend(
+                [
+                    f"foot_f1={row['foot_contact_f1']:.3f}",
+                    f"foot_float={row['foot_floating_frac']:.3f}",
                 ]
             )
         lines.append(" ".join(parts))

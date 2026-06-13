@@ -26,6 +26,7 @@ from utils.object_conditioning import (
     normalize_object_conditioning_variant,
 )
 from utils.object_sampling import object_name_from_data
+from utils.contact_labels import compute_fixed_contact_labels
 
 # ---------------------------------------------------------------------------
 # Compatibility shim for pickles created by NumPy >= 2.0 in envs with older NumPy
@@ -229,11 +230,16 @@ class HandMotionDataset(Dataset):
         }
         
         object_verts = data.get("object_verts")
+        object_verts_arr = (
+            np.asarray(object_verts, dtype=np.float32)
+            if object_verts is not None and (self.include_contact_data or self.include_object_geometry)
+            else None
+        )
         object_rotation = data.get("object_rotation")
-        if self.include_contact_data and object_verts is not None:
+        if self.include_contact_data and self.preload and object_verts_arr is not None:
             contact_points, contact_offsets, contact_mask = compute_contact_annotations(
                 hand_positions,
-                np.asarray(object_verts, dtype=np.float32),
+                object_verts_arr,
                 self.contact_threshold,
             )
         else:
@@ -256,10 +262,31 @@ class HandMotionDataset(Dataset):
             data_proc["contact_mask"] = None
             data_proc["contact_distance_mask"] = None
 
+        if self.include_contact_data:
+            data_proc["_label_object_verts"] = object_verts_arr
+            if self.preload:
+                labels = compute_fixed_contact_labels(
+                    hand_positions,
+                    object_verts=object_verts_arr,
+                    object_contact_sigma=max(float(self.contact_threshold), 1e-6),
+                )
+                data_proc.update(labels)
+            else:
+                data_proc["contact_soft"] = None
+                data_proc["contact_anchor_world"] = None
+                data_proc["contact_mode"] = None
+                data_proc["contact_available"] = None
+        else:
+            data_proc["_label_object_verts"] = None
+            data_proc["contact_soft"] = None
+            data_proc["contact_anchor_world"] = None
+            data_proc["contact_mode"] = None
+            data_proc["contact_available"] = None
+
         # Full object geometry is large and variable-size, so only keep it when
         # a sampling/eval caller explicitly asks for it.
         if self.include_object_geometry:
-            data_proc["object_verts"] = np.asarray(object_verts, dtype=np.float32) if object_verts is not None else None
+            data_proc["object_verts"] = object_verts_arr
             data_proc["object_rotation"] = np.asarray(object_rotation, dtype=np.float32) if object_rotation is not None else None
         else:
             data_proc["object_verts"] = None
@@ -330,11 +357,52 @@ class HandMotionDataset(Dataset):
             if data["object_rotation"] is not None:
                 result["object_rotation"] = torch.from_numpy(data["object_rotation"][start:end]).float()
 
-        if self.include_contact_data and data["contact_points"] is not None:
-            result["contact_points"] = torch.from_numpy(data["contact_points"][start:end]).float()
-            result["contact_offsets"] = torch.from_numpy(data["contact_offsets"][start:end]).float()
-            result["contact_mask"] = torch.from_numpy(data["contact_mask"][start:end]).float()
-            result["contact_distance_mask"] = torch.from_numpy(data["contact_distance_mask"][start:end]).float()
+        if self.include_contact_data:
+            if data["contact_points"] is not None and data["contact_soft"] is not None:
+                contact_points = data["contact_points"][start:end]
+                contact_offsets = data["contact_offsets"][start:end]
+                contact_mask = data["contact_mask"][start:end]
+                contact_distance_mask = data["contact_distance_mask"][start:end]
+                labels = {
+                    "contact_soft": data["contact_soft"][start:end],
+                    "contact_anchor_world": data["contact_anchor_world"][start:end],
+                    "contact_mode": data["contact_mode"][start:end],
+                    "contact_available": data["contact_available"][start:end],
+                }
+            else:
+                object_verts_window = None
+                label_object_verts = data.get("_label_object_verts")
+                if label_object_verts is not None:
+                    object_verts_window = label_object_verts[start:end]
+                annotations = compute_contact_annotations(
+                    hand_positions,
+                    object_verts_window,
+                    self.contact_threshold,
+                )
+                contact_points, contact_offsets, contact_mask = annotations
+                if contact_points is None:
+                    contact_points = np.zeros_like(hand_positions, dtype=np.float32)
+                    contact_offsets = np.zeros_like(hand_positions, dtype=np.float32)
+                    contact_mask = np.zeros((T, 2), dtype=np.float32)
+                contact_distance_mask = contact_mask if object_verts_window is not None else np.zeros((T, 2), dtype=np.float32)
+                labels = compute_fixed_contact_labels(
+                    hand_positions,
+                    object_verts=object_verts_window,
+                    object_contact_sigma=max(float(self.contact_threshold), 1e-6),
+                )
+
+            result["contact_points"] = torch.from_numpy(contact_points).float()
+            result["contact_offsets"] = torch.from_numpy(contact_offsets).float()
+            result["contact_mask"] = torch.from_numpy(contact_mask).float()
+            result["contact_distance_mask"] = torch.from_numpy(contact_distance_mask).float()
+            result["contact_soft"] = torch.from_numpy(labels["contact_soft"]).float()
+            result["contact_anchor_world"] = torch.from_numpy(
+                labels["contact_anchor_world"]
+            ).float()
+            result["contact_mode"] = torch.from_numpy(labels["contact_mode"]).long()
+            result["contact_available"] = torch.from_numpy(
+                labels["contact_available"]
+            ).float()
         
         return result
     

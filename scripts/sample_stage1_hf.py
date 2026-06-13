@@ -255,7 +255,6 @@ def process_sequence(
     hand_mean: Optional[torch.Tensor],
     hand_std: Optional[torch.Tensor],
     device: torch.device,
-    apply_constraints: bool = True,
     contact_threshold: float = 0.03,
     partial_motion_length: Optional[int] = None,
     object_conditioning_variant: str = "variant0",
@@ -308,7 +307,7 @@ def process_sequence(
     }
 
     # Apply contact constraints
-    if apply_constraints and obj_verts is not None and obj_rot is not None:
+    if obj_verts is not None and obj_rot is not None:
         processor = ContactConstraintProcessor(contact_threshold=contact_threshold)
         hands_rect, metadata = processor.process(hands_raw_np, obj_verts, obj_rot)
         result["hands_rectified"] = hands_rect
@@ -336,7 +335,6 @@ def main():
     root_dir = yml["root_dir"]
     ckpt_path = sample_yml["ckpt_path"]
     device_str = sample_yml.get("device", "cuda")
-    apply_constraints = sample_yml.get("apply_constraints", True)
     contact_threshold = sample_yml.get("contact_threshold", 0.03)
     num_samples = sample_yml.get("num_samples", None)
     seed = sample_yml.get("seed", 42)
@@ -411,7 +409,6 @@ def main():
             hand_mean,
             hand_std,
             device,
-            apply_constraints=apply_constraints,
             contact_threshold=contact_threshold,
             partial_motion_length=partial_motion_length,
             object_conditioning_variant=object_conditioning_variant,

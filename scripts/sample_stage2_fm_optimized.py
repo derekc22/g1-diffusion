@@ -180,7 +180,6 @@ def main():
     total_time = 0
     sample_durations = []
     all_frame_counts = []
-    apply_constraints = sample_yml.get("apply_constraints", True)
     
     for fpath in tqdm(files, desc="Processing"):
         fname = os.path.basename(fpath)
@@ -199,7 +198,6 @@ def main():
             object_centroid=data["object_centroid"],
             object_verts=data.get("object_verts"),
             object_rotation=data.get("object_rotation"),
-            apply_constraints=apply_constraints,
             partial_motion_length=partial_motion_length,
         )
         

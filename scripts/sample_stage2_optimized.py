@@ -54,6 +54,7 @@ from utils.rotation import quat_to_rot6d_xyzw, rot6d_to_quat_xyzw, mat_to_quat_x
 from utils.general import load_config
 from utils.motion_postprocess import smooth_body_motion_np
 from utils.robot_kinematics import (
+    apply_contact_preserving_motion_stabilization,
     apply_robot_contact_root_correction,
     apply_robot_contact_state_refinement,
     robot_hand_positions,
@@ -64,6 +65,25 @@ from utils.object_conditioning import (
     describe_object_conditioning_variant,
     normalize_object_conditioning_variant,
 )
+
+
+def _stage2_contact_dim_from_checkpoint(
+    model_cfg: Dict[str, Any], state_dict: Dict[str, torch.Tensor]
+) -> int:
+    contact_dim = int(model_cfg.get("contact_dim", 0))
+    if contact_dim > 0:
+        return contact_dim
+    if "contact_head.weight" in state_dict:
+        return int(state_dict["contact_head.weight"].shape[0])
+    contact_weights = [
+        value
+        for key, value in state_dict.items()
+        if key.startswith("contact_mlp.") and key.endswith(".weight") and value.ndim == 2
+    ]
+    if contact_weights:
+        return int(contact_weights[-1].shape[0])
+    return 0
+
 
 # ---------------------------------------------------------------------------
 # Compatibility shim for pickles created by NumPy >= 2.0
@@ -129,6 +149,25 @@ class OptimizedOmomoPipeline:
         robot_contact_refinement_acceleration_reg_weight: float = 0.0,
         robot_contact_refinement_max_joint_delta: float = 0.35,
         robot_contact_refinement_mode: str = "upper",
+        motion_stabilization: bool = False,
+        motion_stabilization_steps: int = 50,
+        motion_stabilization_lr: float = 0.01,
+        motion_stabilization_mode: str = "root_legs_upper",
+        motion_stabilization_hand_weight: float = 80.0,
+        motion_stabilization_floor_weight: float = 120.0,
+        motion_stabilization_foot_slide_weight: float = 10.0,
+        motion_stabilization_root_acc_weight: float = 2.0,
+        motion_stabilization_root_jerk_weight: float = 8.0,
+        motion_stabilization_state_acc_weight: float = 0.25,
+        motion_stabilization_state_jerk_weight: float = 1.0,
+        motion_stabilization_pose_reg_weight: float = 0.02,
+        motion_stabilization_velocity_reg_weight: float = 0.05,
+        motion_stabilization_max_root_delta: float = 0.08,
+        motion_stabilization_max_joint_delta: float = 0.20,
+        motion_stabilization_floor_height: float = 0.0,
+        motion_stabilization_foot_clearance: float = 0.0,
+        motion_stabilization_stance_height_threshold: float = 0.06,
+        motion_stabilization_stance_speed_threshold: float = 0.04,
         allow_full_length: bool = False,
     ):
         self.device = torch.device(device)
@@ -177,6 +216,39 @@ class OptimizedOmomoPipeline:
             robot_contact_refinement_max_joint_delta
         )
         self.robot_contact_refinement_mode = str(robot_contact_refinement_mode).lower()
+        self.motion_stabilization = bool(motion_stabilization)
+        self.motion_stabilization_steps = int(motion_stabilization_steps)
+        self.motion_stabilization_lr = float(motion_stabilization_lr)
+        self.motion_stabilization_mode = str(motion_stabilization_mode).lower()
+        self.motion_stabilization_hand_weight = float(motion_stabilization_hand_weight)
+        self.motion_stabilization_floor_weight = float(motion_stabilization_floor_weight)
+        self.motion_stabilization_foot_slide_weight = float(
+            motion_stabilization_foot_slide_weight
+        )
+        self.motion_stabilization_root_acc_weight = float(motion_stabilization_root_acc_weight)
+        self.motion_stabilization_root_jerk_weight = float(motion_stabilization_root_jerk_weight)
+        self.motion_stabilization_state_acc_weight = float(
+            motion_stabilization_state_acc_weight
+        )
+        self.motion_stabilization_state_jerk_weight = float(
+            motion_stabilization_state_jerk_weight
+        )
+        self.motion_stabilization_pose_reg_weight = float(
+            motion_stabilization_pose_reg_weight
+        )
+        self.motion_stabilization_velocity_reg_weight = float(
+            motion_stabilization_velocity_reg_weight
+        )
+        self.motion_stabilization_max_root_delta = float(motion_stabilization_max_root_delta)
+        self.motion_stabilization_max_joint_delta = float(motion_stabilization_max_joint_delta)
+        self.motion_stabilization_floor_height = float(motion_stabilization_floor_height)
+        self.motion_stabilization_foot_clearance = float(motion_stabilization_foot_clearance)
+        self.motion_stabilization_stance_height_threshold = float(
+            motion_stabilization_stance_height_threshold
+        )
+        self.motion_stabilization_stance_speed_threshold = float(
+            motion_stabilization_stance_speed_threshold
+        )
         self.allow_full_length = bool(allow_full_length)
         
         # Determine dtype from config
@@ -235,6 +307,7 @@ class OptimizedOmomoPipeline:
         arch = config.get("train", {}).get("architecture", "transformer")
         model_cfg = config.get("model", {})
         dataset_cfg = config.get("dataset", {})
+        contact_dim = int(model_cfg.get("contact_dim", 0))
         self.stage1_checkpoint_variant = normalize_object_conditioning_variant(
             dataset_cfg.get("object_conditioning_variant", "variant0")
         )
@@ -298,6 +371,7 @@ class OptimizedOmomoPipeline:
         max_len = model_cfg.get("max_len", window_size + 100)
         
         state_dict = ckpt["model"]
+        contact_dim = _stage2_contact_dim_from_checkpoint(model_cfg, state_dict)
         if "out_proj.weight" in state_dict:
             state_dim = state_dict["out_proj.weight"].shape[0]
         else:
@@ -315,6 +389,7 @@ class OptimizedOmomoPipeline:
                 dim_feedforward=model_cfg.get("dim_feedforward", 512),
                 dropout=model_cfg.get("dropout", 0.1),
                 max_len=max_len,
+                contact_dim=contact_dim,
             )
         else:
             model = Stage2MLPModel(
@@ -322,6 +397,7 @@ class OptimizedOmomoPipeline:
                 cond_dim=cond_dim,
                 hidden_dim=model_cfg.get("mlp_hidden", 512),
                 num_layers=model_cfg.get("mlp_layers", 4),
+                contact_dim=contact_dim,
             )
         
         model.load_state_dict(ckpt["model"])
@@ -761,7 +837,6 @@ class OptimizedOmomoPipeline:
         object_verts: Optional[np.ndarray] = None,
         object_rotation: Optional[np.ndarray] = None,
         contact_labels: Optional[np.ndarray] = None,
-        apply_constraints: bool = True,
         partial_motion_length: Optional[int] = None,
     ) -> Dict[str, np.ndarray]:
         """
@@ -772,7 +847,6 @@ class OptimizedOmomoPipeline:
             object_centroid: (T, 3) object centroid positions
             object_verts: (T, V, 3) object vertices (optional, for constraints)
             object_rotation: (T, 3, 3) object rotation (optional, for constraints)
-            apply_constraints: Whether to apply contact constraints
             partial_motion_length: If set, generate motion of this length instead of full object motion length
             
         Returns:
@@ -858,7 +932,7 @@ class OptimizedOmomoPipeline:
         hands_raw_np = hands_raw.squeeze(0).float().cpu().numpy()
         
         # Apply contact constraints
-        if apply_constraints and object_verts is not None and object_rotation is not None:
+        if object_verts is not None and object_rotation is not None:
             hands_rect_np, contact_metadata = self.contact_processor.process(
                 hands_raw_np, object_verts, object_rotation, contact_labels=contact_labels
             )
@@ -954,6 +1028,41 @@ class OptimizedOmomoPipeline:
             state_np[:, 3:9] = quat_to_rot6d_xyzw(torch.from_numpy(root_rot_quat).float()).numpy()
             state_np[:, 9:] = dof_pos
 
+        motion_stabilization_metadata = None
+        if self.motion_stabilization:
+            root_pos, root_rot_quat, dof_pos, motion_stabilization_metadata = (
+                apply_contact_preserving_motion_stabilization(
+                    root_pos=root_pos,
+                    root_rot_xyzw=root_rot_quat,
+                    dof_pos=dof_pos,
+                    target_hands=hands_rect_np,
+                    object_verts=object_verts,
+                    floor_height=self.motion_stabilization_floor_height,
+                    foot_clearance=self.motion_stabilization_foot_clearance,
+                    activation_threshold=self.robot_contact_refinement_activation_threshold,
+                    steps=self.motion_stabilization_steps,
+                    lr=self.motion_stabilization_lr,
+                    mode=self.motion_stabilization_mode,
+                    hand_weight=self.motion_stabilization_hand_weight,
+                    floor_weight=self.motion_stabilization_floor_weight,
+                    foot_slide_weight=self.motion_stabilization_foot_slide_weight,
+                    root_acc_weight=self.motion_stabilization_root_acc_weight,
+                    root_jerk_weight=self.motion_stabilization_root_jerk_weight,
+                    state_acc_weight=self.motion_stabilization_state_acc_weight,
+                    state_jerk_weight=self.motion_stabilization_state_jerk_weight,
+                    pose_reg_weight=self.motion_stabilization_pose_reg_weight,
+                    velocity_reg_weight=self.motion_stabilization_velocity_reg_weight,
+                    max_root_delta=self.motion_stabilization_max_root_delta,
+                    max_joint_delta=self.motion_stabilization_max_joint_delta,
+                    stance_height_threshold=self.motion_stabilization_stance_height_threshold,
+                    stance_speed_threshold=self.motion_stabilization_stance_speed_threshold,
+                    device=str(self.device),
+                )
+            )
+            state_np[:, :3] = root_pos
+            state_np[:, 3:9] = quat_to_rot6d_xyzw(torch.from_numpy(root_rot_quat).float()).numpy()
+            state_np[:, 9:] = dof_pos
+
         robot_hands = robot_hand_positions(root_pos, root_rot_quat, dof_pos)
         
         return {
@@ -964,6 +1073,7 @@ class OptimizedOmomoPipeline:
             "robot_contact_metadata": robot_contact_metadata,
             "robot_contact_guidance_metadata": robot_contact_guidance_metadata,
             "robot_contact_refinement_metadata": robot_contact_refinement_metadata,
+            "motion_stabilization_metadata": motion_stabilization_metadata,
             "state": state_np,
             "root_pos": root_pos,
             "root_rot": root_rot_quat,
@@ -1094,6 +1204,57 @@ def main():
             "robot_contact_refinement_max_joint_delta", 0.35
         ),
         robot_contact_refinement_mode=sample_yml.get("robot_contact_refinement_mode", "upper"),
+        motion_stabilization=sample_yml.get("motion_stabilization", False),
+        motion_stabilization_steps=sample_yml.get("motion_stabilization_steps", 50),
+        motion_stabilization_lr=sample_yml.get("motion_stabilization_lr", 0.01),
+        motion_stabilization_mode=sample_yml.get(
+            "motion_stabilization_mode", "root_legs_upper"
+        ),
+        motion_stabilization_hand_weight=sample_yml.get(
+            "motion_stabilization_hand_weight", 80.0
+        ),
+        motion_stabilization_floor_weight=sample_yml.get(
+            "motion_stabilization_floor_weight", 120.0
+        ),
+        motion_stabilization_foot_slide_weight=sample_yml.get(
+            "motion_stabilization_foot_slide_weight", 10.0
+        ),
+        motion_stabilization_root_acc_weight=sample_yml.get(
+            "motion_stabilization_root_acc_weight", 2.0
+        ),
+        motion_stabilization_root_jerk_weight=sample_yml.get(
+            "motion_stabilization_root_jerk_weight", 8.0
+        ),
+        motion_stabilization_state_acc_weight=sample_yml.get(
+            "motion_stabilization_state_acc_weight", 0.25
+        ),
+        motion_stabilization_state_jerk_weight=sample_yml.get(
+            "motion_stabilization_state_jerk_weight", 1.0
+        ),
+        motion_stabilization_pose_reg_weight=sample_yml.get(
+            "motion_stabilization_pose_reg_weight", 0.02
+        ),
+        motion_stabilization_velocity_reg_weight=sample_yml.get(
+            "motion_stabilization_velocity_reg_weight", 0.05
+        ),
+        motion_stabilization_max_root_delta=sample_yml.get(
+            "motion_stabilization_max_root_delta", 0.08
+        ),
+        motion_stabilization_max_joint_delta=sample_yml.get(
+            "motion_stabilization_max_joint_delta", 0.20
+        ),
+        motion_stabilization_floor_height=sample_yml.get(
+            "motion_stabilization_floor_height", 0.0
+        ),
+        motion_stabilization_foot_clearance=sample_yml.get(
+            "motion_stabilization_foot_clearance", 0.0
+        ),
+        motion_stabilization_stance_height_threshold=sample_yml.get(
+            "motion_stabilization_stance_height_threshold", 0.06
+        ),
+        motion_stabilization_stance_speed_threshold=sample_yml.get(
+            "motion_stabilization_stance_speed_threshold", 0.04
+        ),
         allow_full_length=sample_yml.get("allow_full_length", False),
     )
     
@@ -1159,7 +1320,6 @@ def main():
     total_time = 0
     sample_durations = []
     all_frame_counts = []
-    apply_constraints = sample_yml.get("apply_constraints", True)
     
     for fpath in tqdm(files, desc="Processing"):
         fname = os.path.basename(fpath)
@@ -1179,7 +1339,6 @@ def main():
             object_verts=data.get("object_verts"),
             object_rotation=data.get("object_rotation"),
             contact_labels=data.get("contact"),
-            apply_constraints=apply_constraints,
             partial_motion_length=partial_motion_length,
         )
         
@@ -1197,6 +1356,7 @@ def main():
             sample_durations.append(num_frames / fps)
         
         # Save result
+        gen_T = result.get("root_pos", result.get("dof_pos")).shape[0]
         output_data = {
             "seq_name": data.get("seq_name", fname),
             "fps": data.get("fps", 30.0),
@@ -1210,11 +1370,11 @@ def main():
         
         # Add object data for visualization compatibility
         if "object_centroid" in data:
-            output_data["object_pos"] = data["object_centroid"]
+            output_data["object_pos"] = data["object_centroid"][:gen_T]
         
         # object_rot: (T, 4) quaternion in xyzw format from (T, 3, 3) rotation matrix
         if "object_rotation" in data:
-            obj_rot_mat = data["object_rotation"]  # (T, 3, 3)
+            obj_rot_mat = data["object_rotation"][:gen_T]  # (T, 3, 3)
             obj_rot_mat_t = torch.from_numpy(obj_rot_mat).float()
             obj_rot_quat = mat_to_quat_xyzw(obj_rot_mat_t).numpy()  # (T, 4) xyzw
             output_data["object_rot"] = obj_rot_quat
@@ -1233,11 +1393,11 @@ def main():
         
         # Optionally include GT for comparison
         if "root_pos" in data:
-            output_data["gt_root_pos"] = data["root_pos"]
-            output_data["gt_root_rot"] = data["root_rot"]
-            output_data["gt_dof_pos"] = data["dof_pos"]
+            output_data["gt_root_pos"] = data["root_pos"][:gen_T]
+            output_data["gt_root_rot"] = data["root_rot"][:gen_T]
+            output_data["gt_dof_pos"] = data["dof_pos"][:gen_T]
         if "hand_positions" in data:
-            output_data["gt_hands"] = data["hand_positions"]
+            output_data["gt_hands"] = data["hand_positions"][:gen_T]
         
         out_path = os.path.join(output_dir, fname)
         with open(out_path, "wb") as f:

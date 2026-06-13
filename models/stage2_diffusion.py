@@ -11,10 +11,12 @@ class Stage2MLPModel(nn.Module):
         cond_dim: int = 0,
         hidden_dim: int = 512,
         num_layers: int = 4,
+        contact_dim: int = 0,
     ):
         super().__init__()
         self.state_dim = state_dim
         self.cond_dim = cond_dim
+        self.contact_dim = int(contact_dim)
         input_dim = state_dim + cond_dim
 
         self.time_mlp = nn.Sequential(
@@ -32,17 +34,23 @@ class Stage2MLPModel(nn.Module):
         layers.append(nn.Linear(hidden_dim, state_dim))
         self.mlp = nn.Sequential(*layers)
 
-    def forward(
+        self.contact_mlp = None
+        if self.contact_dim > 0:
+            contact_layers = []
+            dim = input_dim
+            for _ in range(num_layers):
+                contact_layers.append(nn.Linear(dim, hidden_dim))
+                contact_layers.append(nn.SiLU())
+                dim = hidden_dim
+            contact_layers.append(nn.Linear(hidden_dim, self.contact_dim))
+            self.contact_mlp = nn.Sequential(*contact_layers)
+
+    def _input_with_time(
         self,
         x: torch.Tensor,
         t: torch.Tensor,
         cond: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """
-        x:    (B, T, state_dim)
-        t:    (B,)
-        cond: (B, T, cond_dim) or None
-        """
         B, T, _ = x.shape
         if self.cond_dim > 0:
             if cond is None:
@@ -57,10 +65,31 @@ class Stage2MLPModel(nn.Module):
         t_emb = timestep_embedding(t, input_dim, dtype=h.dtype).to(h.device)
         t_emb = self.time_mlp(t_emb)
         t_emb = t_emb.unsqueeze(1).expand(-1, T, -1)
-        h = h + t_emb
+        return h + t_emb
 
-        out = self.mlp(h)
-        return out
+    def forward(
+        self,
+        x: torch.Tensor,
+        t: torch.Tensor,
+        cond: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """
+        x:    (B, T, state_dim)
+        t:    (B,)
+        cond: (B, T, cond_dim) or None
+        """
+        return self.mlp(self._input_with_time(x, t, cond))
+
+    def forward_with_contact(
+        self,
+        x: torch.Tensor,
+        t: torch.Tensor,
+        cond: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        h = self._input_with_time(x, t, cond)
+        state = self.mlp(h)
+        contact = self.contact_mlp(h) if self.contact_mlp is not None else None
+        return state, contact
 
 
 
@@ -142,11 +171,13 @@ class Stage2TransformerModel(nn.Module):
         dim_feedforward: int = 512,
         dropout: float = 0.1,
         max_len: int = 512,
+        contact_dim: int = 0,
     ):
         super().__init__()
         self.state_dim = state_dim
         self.cond_dim = cond_dim
         self.d_model = d_model
+        self.contact_dim = int(contact_dim)
 
         input_dim = state_dim + cond_dim
 
@@ -174,8 +205,11 @@ class Stage2TransformerModel(nn.Module):
 
         # Project back to state dimension
         self.out_proj = nn.Linear(d_model, state_dim)
+        self.contact_head = (
+            nn.Linear(d_model, self.contact_dim) if self.contact_dim > 0 else None
+        )
 
-    def forward(
+    def _encode(
         self,
         x: torch.Tensor,
         t: torch.Tensor,
@@ -214,7 +248,33 @@ class Stage2TransformerModel(nn.Module):
 
         # Transformer encoder over the time dimension
         h = self.encoder(h)       # (B, T, d_model)
+        return h
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        t: torch.Tensor,
+        cond: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """
+        x: (B, T, state_dim)
+        t: (B,)
+        cond: (B, T, cond_dim) or None
+        returns: (B, T, state_dim)
+        """
+        h = self._encode(x, t, cond)
 
         # Project back to state dimension
         out = self.out_proj(h)    # (B, T, D)
         return out
+
+    def forward_with_contact(
+        self,
+        x: torch.Tensor,
+        t: torch.Tensor,
+        cond: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        h = self._encode(x, t, cond)
+        state = self.out_proj(h)
+        contact = self.contact_head(h) if self.contact_head is not None else None
+        return state, contact

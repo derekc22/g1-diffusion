@@ -14,7 +14,6 @@ sample:
   seed: 42
 
   # Contact constraints
-  apply_constraints: true
   contact_threshold: 0.03
 
   # Partial motion generation (optional)

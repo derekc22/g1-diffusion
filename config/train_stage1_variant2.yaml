@@ -11,7 +11,7 @@ train:
   device: "cuda:0"
   architecture: "mlp"
   save_dir: "./logs"
-  save_every: 100
+  save_every: 25
 
 dataset:
   window_size: 120

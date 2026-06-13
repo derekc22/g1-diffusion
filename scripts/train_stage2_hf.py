@@ -63,6 +63,7 @@ from utils.object_sampling import build_balanced_sampler, format_label_counts
 from utils.motion_losses import (
     denormalize,
     format_metrics,
+    full_body_contact_loss,
     loss_config,
     robot_fk_hand_loss,
     temporal_reconstruction_loss,
@@ -116,6 +117,19 @@ def main():
         hand_condition_dir = os.path.join(PROJECT_ROOT, hand_condition_dir)
     hand_condition_key = dataset_yml.get("hand_condition_key", "hand_positions")
     require_hand_condition = dataset_yml.get("require_hand_condition", False)
+    contact_dim = int(model_yml.get("contact_dim", 0))
+    include_contact_data = contact_dim > 0 or any(
+        loss_cfg[name] > 0.0
+        for name in (
+            "contact_state_weight",
+            "object_contact_dist_weight",
+            "floor_contact_dist_weight",
+            "contact_velocity_weight",
+            "foot_slide_weight",
+            "floor_penetration_weight",
+            "support_weight",
+        )
+    )
 
     # Create experiment directory
     dtn = datetime.now().strftime("%Y%b%d_%H-%M-%S")
@@ -151,11 +165,18 @@ def main():
         hand_condition_dir=hand_condition_dir,
         hand_condition_key=hand_condition_key,
         require_hand_condition=require_hand_condition,
+        include_contact_data=include_contact_data,
+        floor_height=loss_cfg["floor_height"],
+        object_contact_sigma=dataset_yml.get("object_contact_sigma", 0.05),
+        floor_contact_sigma=dataset_yml.get("floor_contact_sigma", 0.04),
+        contact_eps=dataset_yml.get("contact_eps", 0.2),
+        stick_speed_threshold=dataset_yml.get("stick_speed_threshold", 0.04),
     )
 
     print(f"  Windows: {len(dataset)}")
     print(f"  Files: {dataset.num_files}")
     print(f"  Normalize hand conditioning: {normalize_hands}")
+    print(f"  Contact supervision: {include_contact_data}")
     if hand_condition_dir:
         print(f"  Hand conditioning source: {hand_condition_dir} [{hand_condition_key}]")
 
@@ -200,7 +221,8 @@ def main():
             num_layers=model_yml["num_layers"],
             dim_feedforward=model_yml["dim_feedforward"],
             dropout=model_yml["dropout"],
-            max_len=window_size + 100,
+            max_len=model_yml.get("max_len", window_size + 100),
+            contact_dim=contact_dim,
         ).to(device)
     else:
         model = Stage2MLPModel(
@@ -208,6 +230,7 @@ def main():
             cond_dim=cond_dim,
             hidden_dim=model_yml.get("mlp_hidden", 512),
             num_layers=model_yml.get("mlp_layers", 4),
+            contact_dim=contact_dim,
         ).to(device)
 
     num_params = sum(p.numel() for p in model.parameters())
@@ -224,7 +247,25 @@ def main():
     if init_ckpt_path:
         print(f"Initializing from checkpoint: {init_ckpt_path}")
         init_ckpt = torch.load(init_ckpt_path, map_location=device)
-        model.load_state_dict(init_ckpt["model"])
+        init_state = init_ckpt["model"]
+        model_state = model.state_dict()
+        filtered_state = {}
+        skipped_shape_keys = {}
+        for key, value in init_state.items():
+            if key in model_state and tuple(model_state[key].shape) != tuple(value.shape):
+                skipped_shape_keys[key] = (tuple(value.shape), tuple(model_state[key].shape))
+                continue
+            filtered_state[key] = value
+        load_result = model.load_state_dict(
+            filtered_state,
+            strict=(contact_dim <= 0 and not skipped_shape_keys),
+        )
+        if skipped_shape_keys:
+            print("  Skipped shape-mismatched checkpoint tensors:")
+            for key, (src_shape, dst_shape) in skipped_shape_keys.items():
+                print(f"    {key}: checkpoint {src_shape} -> model {dst_shape}")
+        if contact_dim > 0:
+            print(f"  Non-strict load for contact head: {load_result}")
         if resume_optimizer and "optimizer" in init_ckpt:
             optimizer.load_state_dict(init_ckpt["optimizer"])
 
@@ -262,7 +303,11 @@ def main():
             state_noisy = schedule.q_sample(state, t, noise)
 
             # Predict clean state (x0 prediction)
-            state_pred = model(state_noisy, t, cond)
+            if contact_dim > 0 and hasattr(model, "forward_with_contact"):
+                state_pred, contact_logits = model.forward_with_contact(state_noisy, t, cond)
+            else:
+                state_pred = model(state_noisy, t, cond)
+                contact_logits = None
 
             # Loss
             base_loss = F.mse_loss(state_pred, state)
@@ -279,7 +324,19 @@ def main():
                 cond_phys,
                 loss_cfg,
             )
-            loss = loss_cfg["base_weight"] * base_loss + temporal_loss + robot_loss
+            contact_loss, contact_metrics = full_body_contact_loss(
+                state_pred_phys,
+                contact_logits,
+                batch,
+                loss_cfg,
+                global_step=global_step,
+            )
+            loss = (
+                loss_cfg["base_weight"] * base_loss
+                + temporal_loss
+                + robot_loss
+                + contact_loss
+            )
 
             # Backprop
             optimizer.zero_grad()
@@ -294,6 +351,7 @@ def main():
                     "base": float(base_loss.detach().cpu()),
                     **temporal_metrics,
                     **robot_metrics,
+                    **contact_metrics,
                 }
                 print(
                     f"Epoch {epoch} Step {step} (global {global_step}): "

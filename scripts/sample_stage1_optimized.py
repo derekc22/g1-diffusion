@@ -278,7 +278,6 @@ def process_sequence_optimized(
     hand_std: Optional[torch.Tensor],
     device: torch.device,
     dtype: torch.dtype,
-    apply_constraints: bool = True,
     contact_threshold: float = 0.03,
     use_fast_sampler: bool = True,
     partial_motion_length: Optional[int] = None,
@@ -349,7 +348,7 @@ def process_sequence_optimized(
     }
     
     # Apply contact constraints
-    if apply_constraints and obj_verts is not None and obj_rot is not None:
+    if obj_verts is not None and obj_rot is not None:
         processor = ContactConstraintProcessor(contact_threshold=contact_threshold)
         hands_rect, metadata = processor.process(hands_raw, obj_verts, obj_rot)
         
@@ -565,7 +564,6 @@ def main():
     root_dir = yml["root_dir"]
     ckpt_path = sample_yml["ckpt_path"]
     device_str = sample_yml.get("device", "cuda")
-    apply_constraints = sample_yml.get("apply_constraints", True)
     contact_threshold = sample_yml.get("contact_threshold", 0.03)
     num_samples = sample_yml.get("num_samples", None)
     evaluate = sample_yml.get("evaluate", False)
@@ -697,8 +695,6 @@ def main():
     total_time = 0
     sample_durations = []
     all_frame_counts = []
-
-    apply_constraints = sample_yml.get("apply_constraints", True)
     contact_threshold = sample_yml.get("contact_threshold", 0.03)
     
     all_metrics = []
@@ -719,7 +715,6 @@ def main():
         result = process_sequence_optimized(
             wrapper.model, sampler, schedule, data,
             hand_mean, hand_std, device, wrapper.dtype,
-            apply_constraints=apply_constraints,
             contact_threshold=contact_threshold,
             use_fast_sampler=use_fast,
             partial_motion_length=partial_motion_length,

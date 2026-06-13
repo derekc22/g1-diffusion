@@ -20,7 +20,6 @@ sample:
   seed: 42
 
   # Contact constraints (applied between Stage 1 and Stage 2)
-  apply_constraints: true
   contact_threshold: 0.03
 
   # Partial motion generation

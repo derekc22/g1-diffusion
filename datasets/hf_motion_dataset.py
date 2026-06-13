@@ -26,6 +26,7 @@ from utils.object_conditioning import (
     apply_temporal_conditioning_variant,
     normalize_object_conditioning_variant,
 )
+from utils.contact_labels import compute_fixed_contact_labels
 from datasets.hand_motion_dataset import compute_contact_annotations
 
 
@@ -224,12 +225,15 @@ class HFHandMotionDataset(Dataset):
 
         if self.include_contact_data:
             object_verts = data.get("object_verts")
+            object_verts_arr = (
+                np.asarray(object_verts, dtype=np.float32) if object_verts is not None else None
+            )
             contact_points = contact_offsets = contact_mask = None
             has_surface_contact_points = False
-            if object_verts is not None:
+            if self.preload and object_verts_arr is not None:
                 contact_points, contact_offsets, contact_mask = compute_contact_annotations(
                     hand_pos,
-                    np.asarray(object_verts, dtype=np.float32),
+                    object_verts_arr,
                     self.contact_threshold,
                 )
                 has_surface_contact_points = contact_points is not None
@@ -265,11 +269,29 @@ class HFHandMotionDataset(Dataset):
             data_proc["contact_distance_mask"] = (
                 contact_mask if has_surface_contact_points else np.zeros((T, 2), dtype=np.float32)
             )
+            data_proc["_label_object_verts"] = object_verts_arr
+            if self.preload:
+                labels = compute_fixed_contact_labels(
+                    hand_pos,
+                    object_verts=object_verts_arr,
+                    object_contact_sigma=max(float(self.contact_threshold), 1e-6),
+                )
+                data_proc.update(labels)
+            else:
+                data_proc["contact_soft"] = None
+                data_proc["contact_anchor_world"] = None
+                data_proc["contact_mode"] = None
+                data_proc["contact_available"] = None
         else:
             data_proc["contact_points"] = None
             data_proc["contact_offsets"] = None
             data_proc["contact_mask"] = None
             data_proc["contact_distance_mask"] = None
+            data_proc["_label_object_verts"] = None
+            data_proc["contact_soft"] = None
+            data_proc["contact_anchor_world"] = None
+            data_proc["contact_mode"] = None
+            data_proc["contact_available"] = None
 
         if self.preload:
             self._file_cache[file_idx] = data_proc
@@ -303,7 +325,8 @@ class HFHandMotionDataset(Dataset):
         T = self.window_size
         end = start + T
 
-        hand_t = torch.from_numpy(data["hand_positions"][start:end]).float()
+        hand_window = data["hand_positions"][start:end]
+        hand_t = torch.from_numpy(hand_window).float()
         object_features = data["object_features"][start:end]
         object_features = apply_temporal_conditioning_variant(
             object_features,
@@ -315,6 +338,53 @@ class HFHandMotionDataset(Dataset):
         if self.hand_mean is not None:
             hand_t = (hand_t - self.hand_mean.view(1, -1)) / self.hand_std.view(1, -1)
 
+        contact_extra = {}
+        if self.include_contact_data:
+            if data["contact_points"] is not None and data["contact_soft"] is not None:
+                contact_points = data["contact_points"][start:end]
+                contact_offsets = data["contact_offsets"][start:end]
+                contact_mask = data["contact_mask"][start:end]
+                contact_distance_mask = data["contact_distance_mask"][start:end]
+                labels = {
+                    "contact_soft": data["contact_soft"][start:end],
+                    "contact_anchor_world": data["contact_anchor_world"][start:end],
+                    "contact_mode": data["contact_mode"][start:end],
+                    "contact_available": data["contact_available"][start:end],
+                }
+            else:
+                object_verts_window = None
+                label_object_verts = data.get("_label_object_verts")
+                if label_object_verts is not None:
+                    object_verts_window = label_object_verts[start:end]
+                annotations = compute_contact_annotations(
+                    hand_window,
+                    object_verts_window,
+                    self.contact_threshold,
+                )
+                contact_points, contact_offsets, contact_mask = annotations
+                if contact_points is None:
+                    contact_points = np.zeros_like(hand_window, dtype=np.float32)
+                    contact_offsets = np.zeros_like(hand_window, dtype=np.float32)
+                    contact_mask = np.zeros((T, 2), dtype=np.float32)
+                contact_distance_mask = contact_mask if object_verts_window is not None else np.zeros((T, 2), dtype=np.float32)
+                labels = compute_fixed_contact_labels(
+                    hand_window,
+                    object_verts=object_verts_window,
+                    object_contact_sigma=max(float(self.contact_threshold), 1e-6),
+                )
+            contact_extra = {
+                "contact_points": torch.from_numpy(contact_points).float(),
+                "contact_offsets": torch.from_numpy(contact_offsets).float(),
+                "contact_mask": torch.from_numpy(contact_mask).float(),
+                "contact_distance_mask": torch.from_numpy(contact_distance_mask).float(),
+                "contact_soft": torch.from_numpy(labels["contact_soft"]).float(),
+                "contact_anchor_world": torch.from_numpy(
+                    labels["contact_anchor_world"]
+                ).float(),
+                "contact_mode": torch.from_numpy(labels["contact_mode"]).long(),
+                "contact_available": torch.from_numpy(labels["contact_available"]).float(),
+            }
+
         return {
             "hand_positions": hand_t,       # (T, 6)
             "object_features": obj_t,       # (T, 15)
@@ -323,16 +393,7 @@ class HFHandMotionDataset(Dataset):
             "fps": data["fps"],
             "file_idx": fi,
             "start": start,
-            **(
-                {
-                    "contact_points": torch.from_numpy(data["contact_points"][start:end]).float(),
-                    "contact_offsets": torch.from_numpy(data["contact_offsets"][start:end]).float(),
-                    "contact_mask": torch.from_numpy(data["contact_mask"][start:end]).float(),
-                    "contact_distance_mask": torch.from_numpy(data["contact_distance_mask"][start:end]).float(),
-                }
-                if self.include_contact_data and data["contact_points"] is not None
-                else {}
-            ),
+            **contact_extra,
         }
 
     def get_window_object_names(self) -> List[str]:
@@ -387,6 +448,12 @@ class HFFullBodyDataset(Dataset):
         hand_condition_dir: Optional[str] = None,
         hand_condition_key: str = "hand_positions",
         require_hand_condition: bool = False,
+        include_contact_data: bool = False,
+        floor_height: float = 0.0,
+        object_contact_sigma: float = 0.05,
+        floor_contact_sigma: float = 0.04,
+        contact_eps: float = 0.2,
+        stick_speed_threshold: float = 0.04,
     ):
         super().__init__()
         self.root_dir = root_dir
@@ -398,6 +465,12 @@ class HFFullBodyDataset(Dataset):
         self.hand_condition_dir = hand_condition_dir
         self.hand_condition_key = hand_condition_key
         self.require_hand_condition = require_hand_condition
+        self.include_contact_data = include_contact_data
+        self.floor_height = float(floor_height)
+        self.object_contact_sigma = float(object_contact_sigma)
+        self.floor_contact_sigma = float(floor_contact_sigma)
+        self.contact_eps = float(contact_eps)
+        self.stick_speed_threshold = float(stick_speed_threshold)
 
         self.state_mean = state_mean
         self.state_std = state_std
@@ -506,6 +579,38 @@ class HFFullBodyDataset(Dataset):
             "fps": float(data.get("fps", 30.0)),
         }
 
+        if self.include_contact_data:
+            data_proc["_label_object_verts"] = (
+                np.asarray(data["object_verts"], dtype=np.float32)
+                if data.get("object_verts") is not None
+                else None
+            )
+            if self.preload:
+                labels = compute_fixed_contact_labels(
+                    hand_positions,
+                    object_verts=data_proc["_label_object_verts"],
+                    root_pos=data_proc["root_pos"],
+                    root_rot_xyzw=data_proc["root_rot"],
+                    dof_pos=data_proc["dof_pos"],
+                    floor_height=self.floor_height,
+                    object_contact_sigma=self.object_contact_sigma,
+                    floor_contact_sigma=self.floor_contact_sigma,
+                    contact_eps=self.contact_eps,
+                    stick_speed_threshold=self.stick_speed_threshold,
+                )
+                data_proc.update(labels)
+            else:
+                data_proc["contact_soft"] = None
+                data_proc["contact_anchor_world"] = None
+                data_proc["contact_mode"] = None
+                data_proc["contact_available"] = None
+        else:
+            data_proc["_label_object_verts"] = None
+            data_proc["contact_soft"] = None
+            data_proc["contact_anchor_world"] = None
+            data_proc["contact_mode"] = None
+            data_proc["contact_available"] = None
+
         if self.preload:
             self._file_cache[file_idx] = data_proc
 
@@ -563,6 +668,7 @@ class HFFullBodyDataset(Dataset):
         root_pos = data["root_pos"][start:end]
         root_rot = data["root_rot"][start:end]
         dof_pos = data["dof_pos"][start:end]
+        gt_hand_pos = data["hand_positions"][start:end]
         hand_pos = data["cond_hand_positions"][start:end]
 
         # Convert root rotation to 6D
@@ -581,6 +687,41 @@ class HFFullBodyDataset(Dataset):
         if self.normalize_hands and self.hand_mean is not None:
             hand_t = (hand_t - self.hand_mean.view(1, -1)) / self.hand_std.view(1, -1)
 
+        contact_extra = {}
+        if self.include_contact_data:
+            if data["contact_soft"] is not None:
+                labels = {
+                    "contact_soft": data["contact_soft"][start:end],
+                    "contact_anchor_world": data["contact_anchor_world"][start:end],
+                    "contact_mode": data["contact_mode"][start:end],
+                    "contact_available": data["contact_available"][start:end],
+                }
+            else:
+                object_verts_window = None
+                label_object_verts = data.get("_label_object_verts")
+                if label_object_verts is not None:
+                    object_verts_window = label_object_verts[start:end]
+                labels = compute_fixed_contact_labels(
+                    gt_hand_pos,
+                    object_verts=object_verts_window,
+                    root_pos=root_pos,
+                    root_rot_xyzw=root_rot,
+                    dof_pos=dof_pos,
+                    floor_height=self.floor_height,
+                    object_contact_sigma=self.object_contact_sigma,
+                    floor_contact_sigma=self.floor_contact_sigma,
+                    contact_eps=self.contact_eps,
+                    stick_speed_threshold=self.stick_speed_threshold,
+                )
+            contact_extra = {
+                "contact_soft": torch.from_numpy(labels["contact_soft"]).float(),
+                "contact_anchor_world": torch.from_numpy(
+                    labels["contact_anchor_world"]
+                ).float(),
+                "contact_mode": torch.from_numpy(labels["contact_mode"]).long(),
+                "contact_available": torch.from_numpy(labels["contact_available"]).float(),
+            }
+
         return {
             "state": state_t,      # (T, 38)
             "cond": hand_t,        # (T, 6)
@@ -589,6 +730,7 @@ class HFFullBodyDataset(Dataset):
             "fps": data["fps"],
             "file_idx": fi,
             "start": start,
+            **contact_extra,
         }
 
     def get_window_object_names(self) -> List[str]:
