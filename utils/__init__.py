@@ -14,15 +14,6 @@ from .inference_optimization import (
     TensorRTConverter,
 )
 
-from .flow_matching import (
-    FlowMatchingConfig,
-    FlowMatchingSchedule,
-    euler_solve,
-    midpoint_solve,
-    rk4_solve,
-    get_ode_solver,
-    flow_matching_timestep_embedding,
-)
 from .object_conditioning import (
     OBJECT_CONDITIONING_VARIANTS,
     apply_object_conditioning_variant,
@@ -44,14 +35,6 @@ __all__ = [
     "get_optimal_config",
     "ONNXExporter",
     "TensorRTConverter",
-    # Flow matching
-    "FlowMatchingConfig",
-    "FlowMatchingSchedule",
-    "euler_solve",
-    "midpoint_solve",
-    "rk4_solve",
-    "get_ode_solver",
-    "flow_matching_timestep_embedding",
     # Object conditioning variants
     "OBJECT_CONDITIONING_VARIANTS",
     "apply_object_conditioning_variant",

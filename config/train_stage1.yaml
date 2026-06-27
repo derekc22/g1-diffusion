@@ -20,8 +20,6 @@ dataset:
   train_split: 0.9  # Train/validation split
   preload: true    # Load data lazily to avoid OOM with large datasets
   # variant0: exact object trajectory
-  # variant1: initial/final object frames only
-  # variant2: linear interpolation between initial/final object frames
   object_conditioning_variant: "variant0"
 
 model:

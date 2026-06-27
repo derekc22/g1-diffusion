@@ -27,8 +27,6 @@ dataset:
   preload: true          # Preload all data into memory
   require_object: false  # Set true to only use motions with object data
   # variant0: exact object trajectory/features
-  # variant1: initial/final object frames only
-  # variant2: linear interpolation between initial/final object frames
   object_conditioning_variant: "variant0"
 
 model:
