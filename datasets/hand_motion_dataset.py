@@ -27,6 +27,7 @@ from utils.object_conditioning import (
 )
 from utils.object_sampling import object_name_from_data
 from utils.contact_labels import compute_fixed_contact_labels
+from utils.object_goal_features import object_pose_from_data
 
 # ---------------------------------------------------------------------------
 # Compatibility shim for pickles created by NumPy >= 2.0 in envs with older NumPy
@@ -124,6 +125,9 @@ class HandMotionDataset(Dataset):
         include_contact_data: bool = False,
         contact_threshold: float = 0.05,
         object_conditioning_variant: str = "variant0",
+        include_object_pose_goal: bool = False,
+        goal_mean: Optional[np.ndarray] = None,
+        goal_std: Optional[np.ndarray] = None,
     ):
         super().__init__()
         self.root_dir = root_dir
@@ -135,6 +139,7 @@ class HandMotionDataset(Dataset):
         self.include_object_geometry = include_object_geometry
         self.include_contact_data = include_contact_data
         self.contact_threshold = contact_threshold
+        self.include_object_pose_goal = bool(include_object_pose_goal)
         self.object_conditioning_variant = normalize_object_conditioning_variant(
             object_conditioning_variant
         )
@@ -142,6 +147,8 @@ class HandMotionDataset(Dataset):
         # Normalization stats (only for hand positions)
         self.hand_mean = hand_mean
         self.hand_std = hand_std
+        self.goal_mean = goal_mean
+        self.goal_std = goal_std
         
         # Find all pkl files
         file_paths = sorted(glob.glob(os.path.join(root_dir, "*.pkl")))
@@ -190,6 +197,15 @@ class HandMotionDataset(Dataset):
             mean, std = compute_mean_std(all_hands_arr)
             self.hand_mean = torch.from_numpy(mean).float()
             self.hand_std = torch.from_numpy(std).float()
+        if train and self.include_object_pose_goal and self.goal_mean is None:
+            all_goals = []
+            for idx in range(len(self.windows)):
+                sample = self._get_window(idx, normalized=False)
+                all_goals.append(sample["goal"].numpy()[None])
+            goals_arr = np.concatenate(all_goals, axis=0)
+            mean, std = compute_mean_std(goals_arr)
+            self.goal_mean = torch.from_numpy(mean).float()
+            self.goal_std = torch.from_numpy(std).float()
     
     def _load_file(self, file_idx: int, path: str) -> Optional[Dict[str, Any]]:
         """Load and validate a single pkl file."""
@@ -228,6 +244,13 @@ class HandMotionDataset(Dataset):
             "object_name": object_name_from_data(data, path),
             "fps": float(data.get("fps", 30.0)),
         }
+
+        if self.include_object_pose_goal:
+            try:
+                data_proc["object_pose"] = object_pose_from_data(data, hand_positions.shape[0])
+            except Exception as e:
+                print(f"Warning: Invalid object pose in {path}: {e}")
+                return None
         
         object_verts = data.get("object_verts")
         object_verts_arr = (
@@ -348,6 +371,17 @@ class HandMotionDataset(Dataset):
             "file_idx": file_idx,
             "start": start,
         }
+
+        if self.include_object_pose_goal:
+            object_pose = data["object_pose"][start:end]
+            goal = object_pose[-1]
+            object_pose_t = torch.from_numpy(object_pose).float()
+            goal_t = torch.from_numpy(goal).float()
+            result["object_pose"] = object_pose_t
+            result["goal_raw"] = goal_t
+            if self.goal_mean is not None:
+                goal_t = (goal_t - self.goal_mean) / self.goal_std
+            result["goal"] = goal_t
         
         # Add optional data for contact constraints (only when explicitly requested)
         # These have variable sizes across samples and can't be batched
@@ -446,6 +480,16 @@ class HandMotionDataset(Dataset):
             std = std.view(1, -1)
         
         return hand_positions * std + mean
+
+    def denormalize_goal(self, goal: torch.Tensor) -> torch.Tensor:
+        if self.goal_mean is None or self.goal_std is None:
+            return goal
+        mean = self.goal_mean.to(device=goal.device, dtype=goal.dtype)
+        std = self.goal_std.to(device=goal.device, dtype=goal.dtype)
+        if goal.ndim == 2:
+            mean = mean.view(1, -1)
+            std = std.view(1, -1)
+        return goal * std + mean
 
 
 class ObjectMotionDatasetWithHands(Dataset):

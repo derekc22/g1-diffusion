@@ -1,0 +1,54 @@
+# Object-goal Stage 1: HF-BPS object context -> hand trajectory.
+
+root_dir: "./data/hf_bps_preprocessed"
+
+train:
+  batch_size: 64
+  num_epochs: 10000
+  lr: 1e-4
+  timesteps: 1000
+  beta_start: 1e-4
+  beta_end: 0.02
+  device: "cuda:0"
+  architecture: "transformer"
+  save_dir: "./logs"
+  save_every: 100
+  exp_prefix: "object_goal_stage1_hf_bps"
+  num_workers: 4
+  log_every: 50
+  max_grad_norm: 1.0
+  init_ckpt_path: null
+
+dataset:
+  window_size: 300
+  stride: 10
+  min_seq_len: 30
+  train_split: 0.99
+  preload: true
+  object_conditioning_variant: "variant0"
+  balance_by_object: false
+
+model:
+  max_len: 300
+  encoder_hidden: 512
+  encoder_layers: 3
+  object_feature_dim: 256
+  global_cond_hidden: 256
+  denoiser_hidden: 512
+  denoiser_layers: 4
+  d_model: 256
+  nhead: 4
+  num_layers: 4
+  dim_feedforward: 512
+  dropout: 0.1
+
+loss:
+  base_weight: 1.0
+  velocity_weight: 0.5
+  acceleration_weight: 0.25
+  smooth_acceleration_weight: 0.05
+  smooth_jerk_weight: 0.01
+  contact_weight: 20.0
+  contact_offset_weight: 1.0
+  contact_distance_weight: 5.0
+  contact_margin: 0.025

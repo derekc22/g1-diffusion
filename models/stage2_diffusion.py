@@ -9,6 +9,7 @@ class Stage2MLPModel(nn.Module):
         self,
         state_dim: int,
         cond_dim: int = 0,
+        global_cond_dim: int = 0,
         hidden_dim: int = 512,
         num_layers: int = 4,
         contact_dim: int = 0,
@@ -16,8 +17,17 @@ class Stage2MLPModel(nn.Module):
         super().__init__()
         self.state_dim = state_dim
         self.cond_dim = cond_dim
+        self.global_cond_dim = int(global_cond_dim)
         self.contact_dim = int(contact_dim)
         input_dim = state_dim + cond_dim
+
+        self.global_cond_mlp = None
+        if self.global_cond_dim > 0:
+            self.global_cond_mlp = nn.Sequential(
+                nn.Linear(self.global_cond_dim, hidden_dim),
+                nn.SiLU(),
+                nn.Linear(hidden_dim, input_dim),
+            )
 
         self.time_mlp = nn.Sequential(
             nn.Linear(input_dim, input_dim),
@@ -50,6 +60,7 @@ class Stage2MLPModel(nn.Module):
         x: torch.Tensor,
         t: torch.Tensor,
         cond: torch.Tensor | None = None,
+        global_cond: torch.Tensor | None = None,
     ) -> torch.Tensor:
         B, T, _ = x.shape
         if self.cond_dim > 0:
@@ -60,6 +71,18 @@ class Stage2MLPModel(nn.Module):
             h = torch.cat([x, cond], dim=-1)
         else:
             h = x
+
+        if self.global_cond_dim > 0:
+            if global_cond is None:
+                raise ValueError("global_cond must be provided when global_cond_dim > 0")
+            if global_cond.shape != (B, self.global_cond_dim):
+                raise ValueError(
+                    f"global_cond shape {global_cond.shape} incompatible with "
+                    f"(B, global_cond_dim)=({B}, {self.global_cond_dim})"
+                )
+            assert self.global_cond_mlp is not None
+            goal_emb = self.global_cond_mlp(global_cond.to(dtype=h.dtype))
+            h = h + goal_emb.unsqueeze(1)
 
         input_dim = h.shape[-1]
         t_emb = timestep_embedding(t, input_dim, dtype=h.dtype).to(h.device)
@@ -72,21 +95,24 @@ class Stage2MLPModel(nn.Module):
         x: torch.Tensor,
         t: torch.Tensor,
         cond: torch.Tensor | None = None,
+        global_cond: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         x:    (B, T, state_dim)
         t:    (B,)
         cond: (B, T, cond_dim) or None
+        global_cond: (B, global_cond_dim) or None
         """
-        return self.mlp(self._input_with_time(x, t, cond))
+        return self.mlp(self._input_with_time(x, t, cond, global_cond))
 
     def forward_with_contact(
         self,
         x: torch.Tensor,
         t: torch.Tensor,
         cond: torch.Tensor | None = None,
+        global_cond: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        h = self._input_with_time(x, t, cond)
+        h = self._input_with_time(x, t, cond, global_cond)
         state = self.mlp(h)
         contact = self.contact_mlp(h) if self.contact_mlp is not None else None
         return state, contact
@@ -172,17 +198,29 @@ class Stage2TransformerModel(nn.Module):
         dropout: float = 0.1,
         max_len: int = 512,
         contact_dim: int = 0,
+        global_cond_dim: int = 0,
+        global_cond_hidden: int | None = None,
     ):
         super().__init__()
         self.state_dim = state_dim
         self.cond_dim = cond_dim
         self.d_model = d_model
         self.contact_dim = int(contact_dim)
+        self.global_cond_dim = int(global_cond_dim)
 
         input_dim = state_dim + cond_dim
 
         # Project per-frame state (+cond) to model dimension
         self.state_proj = nn.Linear(input_dim, d_model)
+
+        self.global_cond_mlp = None
+        if self.global_cond_dim > 0:
+            hidden = int(global_cond_hidden or d_model)
+            self.global_cond_mlp = nn.Sequential(
+                nn.Linear(self.global_cond_dim, hidden),
+                nn.SiLU(),
+                nn.Linear(hidden, d_model),
+            )
 
         # Positional encoding over time
         self.pos_encoding = SinusoidalPositionalEncoding(d_model, max_len=max_len)
@@ -214,6 +252,7 @@ class Stage2TransformerModel(nn.Module):
         x: torch.Tensor,
         t: torch.Tensor,
         cond: torch.Tensor | None = None,
+        global_cond: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         x: (B, T, state_dim)
@@ -237,6 +276,17 @@ class Stage2TransformerModel(nn.Module):
         # Project state (+cond) to d_model
         h = self.state_proj(x_in)  # (B, T, d_model)
 
+        if self.global_cond_dim > 0:
+            if global_cond is None:
+                raise ValueError("global_cond must be provided when global_cond_dim > 0")
+            if global_cond.shape != (B, self.global_cond_dim):
+                raise ValueError(
+                    f"global_cond shape {global_cond.shape} incompatible with "
+                    f"(B, global_cond_dim)=({B}, {self.global_cond_dim})"
+                )
+            assert self.global_cond_mlp is not None
+            h = h + self.global_cond_mlp(global_cond.to(dtype=h.dtype)).unsqueeze(1)
+
         # Add timestep embedding (same for all time steps in a sequence)
         t_emb = timestep_embedding(t, self.d_model, dtype=x.dtype)  # (B, d_model)
         t_emb = self.time_mlp(t_emb)                      # (B, d_model)
@@ -255,14 +305,16 @@ class Stage2TransformerModel(nn.Module):
         x: torch.Tensor,
         t: torch.Tensor,
         cond: torch.Tensor | None = None,
+        global_cond: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         x: (B, T, state_dim)
         t: (B,)
         cond: (B, T, cond_dim) or None
+        global_cond: (B, global_cond_dim) or None
         returns: (B, T, state_dim)
         """
-        h = self._encode(x, t, cond)
+        h = self._encode(x, t, cond, global_cond)
 
         # Project back to state dimension
         out = self.out_proj(h)    # (B, T, D)
@@ -273,8 +325,9 @@ class Stage2TransformerModel(nn.Module):
         x: torch.Tensor,
         t: torch.Tensor,
         cond: torch.Tensor | None = None,
+        global_cond: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        h = self._encode(x, t, cond)
+        h = self._encode(x, t, cond, global_cond)
         state = self.out_proj(h)
         contact = self.contact_head(h) if self.contact_head is not None else None
         return state, contact

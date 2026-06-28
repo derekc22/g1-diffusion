@@ -289,11 +289,16 @@ class Stage1HandDiffusion(nn.Module):
         dim_feedforward: int = 512,
         dropout: float = 0.1,
         max_len: int = 512,
+        object_pose_dim: int = 0,
+        global_cond_dim: int = 0,
+        global_cond_hidden: int | None = None,
     ):
         super().__init__()
         
         self.hand_dim = hand_dim
         self.object_feature_dim = object_feature_dim
+        self.object_pose_dim = int(object_pose_dim)
+        self.global_cond_dim = int(global_cond_dim)
         
         # Object geometry encoder (MLP)
         self.encoder = ObjectGeometryEncoder(
@@ -303,6 +308,23 @@ class Stage1HandDiffusion(nn.Module):
             out_dim=object_feature_dim,
             num_layers=encoder_layers,
         )
+
+        self.object_pose_mlp = None
+        if self.object_pose_dim > 0:
+            self.object_pose_mlp = nn.Sequential(
+                nn.Linear(self.object_pose_dim, object_feature_dim),
+                nn.SiLU(),
+                nn.Linear(object_feature_dim, object_feature_dim),
+            )
+
+        self.global_cond_mlp = None
+        if self.global_cond_dim > 0:
+            hidden = int(global_cond_hidden or object_feature_dim)
+            self.global_cond_mlp = nn.Sequential(
+                nn.Linear(self.global_cond_dim, hidden),
+                nn.SiLU(),
+                nn.Linear(hidden, object_feature_dim),
+            )
         
         # Hand position denoiser (Transformer)
         self.denoiser = Stage1TransformerDenoiser(
@@ -320,6 +342,8 @@ class Stage1HandDiffusion(nn.Module):
         self,
         bps_encoding: torch.Tensor,
         object_centroid: torch.Tensor,
+        object_pose: torch.Tensor | None = None,
+        global_cond: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Encode object geometry into feature vectors.
@@ -331,7 +355,34 @@ class Stage1HandDiffusion(nn.Module):
         Returns:
             object_features: (B, T, object_feature_dim)
         """
-        return self.encoder(bps_encoding, object_centroid)
+        B, T = object_centroid.shape[:2]
+        features = self.encoder(bps_encoding, object_centroid)
+
+        if self.object_pose_dim > 0:
+            if object_pose is None:
+                raise ValueError("object_pose must be provided when object_pose_dim > 0")
+            if object_pose.shape != (B, T, self.object_pose_dim):
+                raise ValueError(
+                    f"object_pose shape {object_pose.shape} incompatible with "
+                    f"(B, T, object_pose_dim)=({B}, {T}, {self.object_pose_dim})"
+                )
+            assert self.object_pose_mlp is not None
+            features = features + self.object_pose_mlp(object_pose.to(dtype=features.dtype))
+
+        if self.global_cond_dim > 0:
+            if global_cond is None:
+                raise ValueError("global_cond must be provided when global_cond_dim > 0")
+            if global_cond.shape != (B, self.global_cond_dim):
+                raise ValueError(
+                    f"global_cond shape {global_cond.shape} incompatible with "
+                    f"(B, global_cond_dim)=({B}, {self.global_cond_dim})"
+                )
+            assert self.global_cond_mlp is not None
+            features = features + self.global_cond_mlp(
+                global_cond.to(dtype=features.dtype)
+            ).unsqueeze(1)
+
+        return features
     
     def forward(
         self,
@@ -339,6 +390,8 @@ class Stage1HandDiffusion(nn.Module):
         t: torch.Tensor,
         bps_encoding: torch.Tensor,
         object_centroid: torch.Tensor,
+        object_pose: torch.Tensor | None = None,
+        global_cond: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Full forward pass: encode object + denoise hands.
@@ -353,7 +406,12 @@ class Stage1HandDiffusion(nn.Module):
             (B, T, 6) predicted clean hand positions
         """
         # Encode object geometry
-        object_features = self.encode_object(bps_encoding, object_centroid)
+        object_features = self.encode_object(
+            bps_encoding,
+            object_centroid,
+            object_pose=object_pose,
+            global_cond=global_cond,
+        )
         
         # Denoise hand positions
         return self.denoiser(x, t, object_features)
@@ -440,11 +498,16 @@ class Stage1HandDiffusionMLP(nn.Module):
         hand_dim: int = 6,
         denoiser_hidden: int = 512,
         denoiser_layers: int = 4,
+        object_pose_dim: int = 0,
+        global_cond_dim: int = 0,
+        global_cond_hidden: int | None = None,
     ):
         super().__init__()
         
         self.hand_dim = hand_dim
         self.object_feature_dim = object_feature_dim
+        self.object_pose_dim = int(object_pose_dim)
+        self.global_cond_dim = int(global_cond_dim)
         
         self.encoder = ObjectGeometryEncoder(
             bps_dim=bps_dim,
@@ -453,6 +516,23 @@ class Stage1HandDiffusionMLP(nn.Module):
             out_dim=object_feature_dim,
             num_layers=encoder_layers,
         )
+
+        self.object_pose_mlp = None
+        if self.object_pose_dim > 0:
+            self.object_pose_mlp = nn.Sequential(
+                nn.Linear(self.object_pose_dim, object_feature_dim),
+                nn.SiLU(),
+                nn.Linear(object_feature_dim, object_feature_dim),
+            )
+
+        self.global_cond_mlp = None
+        if self.global_cond_dim > 0:
+            hidden = int(global_cond_hidden or object_feature_dim)
+            self.global_cond_mlp = nn.Sequential(
+                nn.Linear(self.global_cond_dim, hidden),
+                nn.SiLU(),
+                nn.Linear(hidden, object_feature_dim),
+            )
         
         self.denoiser = Stage1MLPDenoiser(
             hand_dim=hand_dim,
@@ -465,8 +545,34 @@ class Stage1HandDiffusionMLP(nn.Module):
         self,
         bps_encoding: torch.Tensor,
         object_centroid: torch.Tensor,
+        object_pose: torch.Tensor | None = None,
+        global_cond: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.encoder(bps_encoding, object_centroid)
+        B, T = object_centroid.shape[:2]
+        features = self.encoder(bps_encoding, object_centroid)
+        if self.object_pose_dim > 0:
+            if object_pose is None:
+                raise ValueError("object_pose must be provided when object_pose_dim > 0")
+            if object_pose.shape != (B, T, self.object_pose_dim):
+                raise ValueError(
+                    f"object_pose shape {object_pose.shape} incompatible with "
+                    f"(B, T, object_pose_dim)=({B}, {T}, {self.object_pose_dim})"
+                )
+            assert self.object_pose_mlp is not None
+            features = features + self.object_pose_mlp(object_pose.to(dtype=features.dtype))
+        if self.global_cond_dim > 0:
+            if global_cond is None:
+                raise ValueError("global_cond must be provided when global_cond_dim > 0")
+            if global_cond.shape != (B, self.global_cond_dim):
+                raise ValueError(
+                    f"global_cond shape {global_cond.shape} incompatible with "
+                    f"(B, global_cond_dim)=({B}, {self.global_cond_dim})"
+                )
+            assert self.global_cond_mlp is not None
+            features = features + self.global_cond_mlp(
+                global_cond.to(dtype=features.dtype)
+            ).unsqueeze(1)
+        return features
     
     def forward(
         self,
@@ -474,6 +580,13 @@ class Stage1HandDiffusionMLP(nn.Module):
         t: torch.Tensor,
         bps_encoding: torch.Tensor,
         object_centroid: torch.Tensor,
+        object_pose: torch.Tensor | None = None,
+        global_cond: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        object_features = self.encode_object(bps_encoding, object_centroid)
+        object_features = self.encode_object(
+            bps_encoding,
+            object_centroid,
+            object_pose=object_pose,
+            global_cond=global_cond,
+        )
         return self.denoiser(x, t, object_features)

@@ -23,11 +23,16 @@ from utils.rotation import quat_to_rot6d_xyzw
 from utils.normalization import compute_mean_std
 from utils.object_sampling import object_name_from_data
 from utils.object_conditioning import (
+    apply_object_conditioning_variant,
     apply_temporal_conditioning_variant,
     normalize_object_conditioning_variant,
 )
 from utils.contact_labels import compute_fixed_contact_labels
 from datasets.hand_motion_dataset import compute_contact_annotations
+from utils.object_goal_features import (
+    object_pose_from_data,
+    robot_object_layout,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -454,6 +459,14 @@ class HFFullBodyDataset(Dataset):
         floor_contact_sigma: float = 0.04,
         contact_eps: float = 0.2,
         stick_speed_threshold: float = 0.04,
+        target_includes_object_pose: bool = False,
+        include_object_context: bool = False,
+        include_goal: bool = False,
+        goal_mean: Optional[torch.Tensor] = None,
+        goal_std: Optional[torch.Tensor] = None,
+        flatten_bps: bool = True,
+        object_conditioning_variant: str = "variant0",
+        object_context_mode: str = "static_bps",
     ):
         super().__init__()
         self.root_dir = root_dir
@@ -471,11 +484,27 @@ class HFFullBodyDataset(Dataset):
         self.floor_contact_sigma = float(floor_contact_sigma)
         self.contact_eps = float(contact_eps)
         self.stick_speed_threshold = float(stick_speed_threshold)
+        self.target_includes_object_pose = bool(target_includes_object_pose)
+        self.include_object_context = bool(include_object_context)
+        self.include_goal = bool(include_goal)
+        self.flatten_bps = bool(flatten_bps)
+        self.object_conditioning_variant = normalize_object_conditioning_variant(
+            object_conditioning_variant
+        )
+        self.object_context_mode = str(object_context_mode)
+        if self.object_context_mode != "static_bps":
+            raise ValueError(
+                "HFFullBodyDataset object-goal Stage 2 currently supports "
+                "object_context_mode='static_bps' only, to avoid leaking the "
+                "clean per-frame object pose target into the condition."
+            )
 
         self.state_mean = state_mean
         self.state_std = state_std
         self.hand_mean = hand_mean
         self.hand_std = hand_std
+        self.goal_mean = goal_mean
+        self.goal_std = goal_std
 
         # Find PKL files
         file_paths = sorted(glob.glob(os.path.join(root_dir, "*.pkl")))
@@ -517,6 +546,12 @@ class HFFullBodyDataset(Dataset):
         # Compute normalization stats
         if train and self.state_mean is None:
             self._compute_norm_stats()
+        elif train and self.include_goal and self.goal_mean is None:
+            self._compute_goal_norm_stats()
+
+    @staticmethod
+    def robot_object_layout() -> Dict[str, Any]:
+        return robot_object_layout()
 
     def _load_file(self, file_idx: int, path: str) -> Optional[Dict[str, Any]]:
         if self.preload and file_idx in self._file_cache:
@@ -579,6 +614,25 @@ class HFFullBodyDataset(Dataset):
             "fps": float(data.get("fps", 30.0)),
         }
 
+        if self.target_includes_object_pose or self.include_object_context or self.include_goal:
+            try:
+                T_pose = min(
+                    data_proc["root_pos"].shape[0],
+                    data_proc["root_rot"].shape[0],
+                    data_proc["dof_pos"].shape[0],
+                    hand_positions.shape[0],
+                )
+                data_proc["object_pose"] = object_pose_from_data(data, T_pose)
+            except Exception as e:
+                print(f"Warning: Invalid object pose in {path}: {e}")
+                return None
+
+        if self.include_object_context:
+            if "bps_encoding" not in data or data.get("bps_encoding") is None:
+                print(f"Warning: Missing bps_encoding in {path}")
+                return None
+            data_proc["bps_encoding"] = np.asarray(data["bps_encoding"], dtype=np.float32)
+
         if self.include_contact_data:
             data_proc["_label_object_verts"] = (
                 np.asarray(data["object_verts"], dtype=np.float32)
@@ -619,6 +673,7 @@ class HFFullBodyDataset(Dataset):
     def _compute_norm_stats(self):
         all_states = []
         all_hands = []
+        all_goals = []
 
         for fi, start in self.windows:
             data = self._file_cache.get(fi)
@@ -639,8 +694,13 @@ class HFFullBodyDataset(Dataset):
             ).numpy()
 
             state = np.concatenate([root_pos, root_rot_6d, dof_pos], axis=-1)
+            if self.target_includes_object_pose:
+                object_pose = data["object_pose"][start:end]
+                state = np.concatenate([state, object_pose], axis=-1)
             all_states.append(state)
             all_hands.append(hand_pos)
+            if self.include_goal:
+                all_goals.append(data["object_pose"][end - 1][None])
 
         states_arr = np.concatenate(all_states, axis=0)
         hands_arr = np.concatenate(all_hands, axis=0)
@@ -652,6 +712,24 @@ class HFFullBodyDataset(Dataset):
         self.state_std = torch.from_numpy(state_std).float()
         self.hand_mean = torch.from_numpy(hand_mean).float()
         self.hand_std = torch.from_numpy(hand_std).float()
+        if self.include_goal:
+            goal_arr = np.concatenate(all_goals, axis=0)
+            goal_mean, goal_std = compute_mean_std(goal_arr)
+            self.goal_mean = torch.from_numpy(goal_mean).float()
+            self.goal_std = torch.from_numpy(goal_std).float()
+
+    def _compute_goal_norm_stats(self):
+        all_goals = []
+        for fi, start in self.windows:
+            data = self._file_cache.get(fi)
+            if data is None:
+                data = self._load_file(fi, self.file_paths[fi])
+            end = start + self.window_size
+            all_goals.append(data["object_pose"][end - 1][None])
+        goal_arr = np.concatenate(all_goals, axis=0)
+        goal_mean, goal_std = compute_mean_std(goal_arr)
+        self.goal_mean = torch.from_numpy(goal_mean).float()
+        self.goal_std = torch.from_numpy(goal_std).float()
 
     def __len__(self) -> int:
         return len(self.windows)
@@ -670,6 +748,8 @@ class HFFullBodyDataset(Dataset):
         dof_pos = data["dof_pos"][start:end]
         gt_hand_pos = data["hand_positions"][start:end]
         hand_pos = data["cond_hand_positions"][start:end]
+        object_pose = data.get("object_pose")
+        object_pose_window = object_pose[start:end] if object_pose is not None else None
 
         # Convert root rotation to 6D
         root_rot_6d = quat_to_rot6d_xyzw(
@@ -678,14 +758,54 @@ class HFFullBodyDataset(Dataset):
 
         # Build state vector: [root_pos(3), root_rot_6d(6), dof_pos(D)]
         state = np.concatenate([root_pos, root_rot_6d, dof_pos], axis=-1)
+        if self.target_includes_object_pose:
+            state = np.concatenate([state, object_pose_window], axis=-1)
         state_t = torch.from_numpy(state).float()
         hand_t = torch.from_numpy(hand_pos).float()
+        cond_hand_t = hand_t
 
         # Normalize
         if self.state_mean is not None:
             state_t = (state_t - self.state_mean.view(1, -1)) / self.state_std.view(1, -1)
         if self.normalize_hands and self.hand_mean is not None:
-            hand_t = (hand_t - self.hand_mean.view(1, -1)) / self.hand_std.view(1, -1)
+            cond_hand_t = (hand_t - self.hand_mean.view(1, -1)) / self.hand_std.view(1, -1)
+
+        cond_parts = [cond_hand_t]
+        context_extra: Dict[str, Any] = {}
+        if self.include_object_context:
+            bps_encoding = data["bps_encoding"][start:end]
+            object_conditioning = apply_object_conditioning_variant(
+                variant=self.object_conditioning_variant,
+                bps_encoding=bps_encoding,
+            )
+            bps_encoding = object_conditioning["bps_encoding"]
+            if self.flatten_bps and bps_encoding.ndim == 3:
+                bps_context = bps_encoding.reshape(T, -1)
+            else:
+                bps_context = bps_encoding
+            if bps_context.ndim != 2:
+                raise ValueError(f"Expected flattened BPS context, got {bps_context.shape}")
+            if self.object_context_mode == "static_bps":
+                bps_context = np.repeat(bps_context[:1], T, axis=0)
+            bps_t = torch.from_numpy(bps_context).float()
+            cond_parts.append(bps_t)
+            context_extra = {
+                "object_pose_target": torch.from_numpy(object_pose_window).float(),
+                "bps_context": bps_t,
+            }
+
+        cond_t = torch.cat(cond_parts, dim=-1)
+
+        goal_extra = {}
+        if self.include_goal:
+            goal_raw = torch.from_numpy(object_pose_window[-1]).float()
+            goal = goal_raw
+            if self.goal_mean is not None:
+                goal = (goal - self.goal_mean) / self.goal_std
+            goal_extra = {
+                "goal": goal,
+                "goal_raw": goal_raw,
+            }
 
         contact_extra = {}
         if self.include_contact_data:
@@ -723,13 +843,16 @@ class HFFullBodyDataset(Dataset):
             }
 
         return {
-            "state": state_t,      # (T, 38)
-            "cond": hand_t,        # (T, 6)
+            "state": state_t,      # (T, state_dim)
+            "cond": cond_t,
+            "cond_hands": hand_t,
             "seq_name": data["seq_name"],
             "object_name": data["object_name"],
             "fps": data["fps"],
             "file_idx": fi,
             "start": start,
+            **context_extra,
+            **goal_extra,
             **contact_extra,
         }
 
@@ -764,3 +887,13 @@ class HFFullBodyDataset(Dataset):
             mean = mean.view(1, -1)
             std = std.view(1, -1)
         return hands * std + mean
+
+    def denormalize_goal(self, goal: torch.Tensor) -> torch.Tensor:
+        if self.goal_mean is None or self.goal_std is None:
+            return goal
+        mean = self.goal_mean.to(device=goal.device, dtype=goal.dtype)
+        std = self.goal_std.to(device=goal.device, dtype=goal.dtype)
+        if goal.ndim == 2:
+            mean = mean.view(1, -1)
+            std = std.view(1, -1)
+        return goal * std + mean

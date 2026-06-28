@@ -1,0 +1,70 @@
+# Tiny CPU smoke config for object-goal Stage 2.
+
+root_dir: "./data/hf_bps_preprocessed"
+
+train:
+  batch_size: 2
+  num_epochs: 1
+  lr: 1e-4
+  timesteps: 8
+  beta_start: 1e-4
+  beta_end: 0.02
+  device: "cpu"
+  architecture: "transformer"
+  save_dir: "./logs"
+  save_every: 1
+  exp_prefix: "object_goal_stage2_hf_bps_smoke"
+  num_workers: 0
+  log_every: 1
+  max_grad_norm: 1.0
+  max_train_seconds: 20
+  init_ckpt_path: null
+
+dataset:
+  window_size: 300
+  stride: 300
+  min_seq_len: 30
+  train_split: 0.99
+  preload: true
+  normalize_hands: false
+  hand_condition_dir: null
+  hand_condition_key: "hands_rectified"
+  require_hand_condition: false
+  object_conditioning_variant: "variant0"
+  object_context_mode: "static_bps"
+  object_contact_sigma: 0.05
+  floor_contact_sigma: 0.04
+  contact_eps: 0.2
+  stick_speed_threshold: 0.04
+  balance_by_object: false
+
+model:
+  contact_dim: 0
+  max_len: 300
+  global_cond_hidden: 64
+  mlp_hidden: 64
+  mlp_layers: 2
+  d_model: 64
+  nhead: 4
+  num_layers: 1
+  dim_feedforward: 128
+  dropout: 0.0
+
+loss:
+  base_weight: 1.0
+  velocity_weight: 0.01
+  acceleration_weight: 0.0
+  smooth_acceleration_weight: 0.0
+  smooth_jerk_weight: 0.0
+  robot_hand_weight: 0.0
+  robot_hand_contact_weight: 0.0
+  robot_hand_contact_margin: 0.12
+  contact_state_weight: 0.0
+  object_contact_dist_weight: 0.0
+  floor_contact_dist_weight: 0.0
+  contact_velocity_weight: 0.0
+  foot_slide_weight: 0.0
+  floor_penetration_weight: 0.0
+  support_weight: 0.0
+  geometric_warmup_steps: 0
+  floor_height: 0.0

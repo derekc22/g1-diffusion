@@ -1,0 +1,16 @@
+sample:
+  stage1_ckpt_path: ""
+  stage2_ckpt_path: ""
+  root_dir: "./data/hf_bps_preprocessed"
+  input_path: null
+  output_dir: "./out/object_goal_two_stage"
+  num_samples: 1
+  max_len: 300
+  device: "cuda:0"
+  require_contact_geometry: true
+  contact_threshold: 0.03
+  stage1_contact_search_threshold: 0.08
+  stage1_max_contact_offset: 0.02
+  stage1_max_contact_correction: 0.06
+  stage1_fallback_contact_search_threshold: 0.25
+  stage1_fallback_max_contact_correction: 0.60

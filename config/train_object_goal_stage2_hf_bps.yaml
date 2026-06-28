@@ -1,0 +1,69 @@
+# Object-goal Stage 2: rectified hands + object context -> robot-plus-object.
+
+root_dir: "./data/hf_bps_preprocessed"
+
+train:
+  batch_size: 16
+  num_epochs: 10000
+  lr: 5e-6
+  timesteps: 1000
+  beta_start: 1e-4
+  beta_end: 0.02
+  device: "cuda:0"
+  architecture: "transformer"
+  save_dir: "./logs"
+  save_every: 100
+  exp_prefix: "object_goal_stage2_hf_bps"
+  num_workers: 4
+  log_every: 50
+  max_grad_norm: 1.0
+  init_ckpt_path: null
+
+dataset:
+  window_size: 300
+  stride: 10
+  min_seq_len: 30
+  train_split: 0.99
+  preload: true
+  normalize_hands: false
+  hand_condition_dir: null
+  hand_condition_key: "hands_rectified"
+  require_hand_condition: false
+  object_conditioning_variant: "variant0"
+  object_context_mode: "static_bps"
+  object_contact_sigma: 0.05
+  floor_contact_sigma: 0.04
+  contact_eps: 0.2
+  stick_speed_threshold: 0.04
+  balance_by_object: false
+
+model:
+  contact_dim: 4
+  max_len: 300
+  global_cond_hidden: 512
+  mlp_hidden: 512
+  mlp_layers: 4
+  d_model: 512
+  nhead: 8
+  num_layers: 8
+  dim_feedforward: 512
+  dropout: 0.1
+
+loss:
+  base_weight: 1.0
+  velocity_weight: 0.2
+  acceleration_weight: 0.1
+  smooth_acceleration_weight: 0.02
+  smooth_jerk_weight: 0.005
+  robot_hand_weight: 8.0
+  robot_hand_contact_weight: 12.0
+  robot_hand_contact_margin: 0.12
+  contact_state_weight: 0.01
+  object_contact_dist_weight: 0.50
+  floor_contact_dist_weight: 0.10
+  contact_velocity_weight: 0.10
+  foot_slide_weight: 0.05
+  floor_penetration_weight: 0.30
+  support_weight: 0.0
+  geometric_warmup_steps: 1000
+  floor_height: 0.0
