@@ -34,6 +34,7 @@ from datasets.hf_motion_dataset import HFFullBodyDataset
 from models.stage1_diffusion import Stage1HandDiffusion
 from models.stage2_diffusion import Stage2TransformerModel
 from utils.diffusion import DiffusionConfig, DiffusionSchedule
+from utils.general import load_torch_checkpoint
 from utils.object_goal_features import OBJECT_POSE_DIM, ROBOT_OBJECT_STATE_DIM, robot_object_layout
 
 
@@ -163,7 +164,7 @@ def main() -> None:
             },
             ckpt_path,
         )
-        round_trip = torch.load(ckpt_path, map_location=device, weights_only=False)
+        round_trip = load_torch_checkpoint(ckpt_path, map_location=device)
         assert round_trip["pipeline_type"] == "object_goal_two_stage"
         assert round_trip["stage_target"] == "robot_state_plus_object_pose"
         assert round_trip["layout"]["motion_dim"] == ROBOT_OBJECT_STATE_DIM

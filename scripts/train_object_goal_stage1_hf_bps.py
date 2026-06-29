@@ -49,7 +49,7 @@ if "numpy._core.umath" not in sys.modules:
 from datasets.hand_motion_dataset import HandMotionDataset
 from models.stage1_diffusion import Stage1HandDiffusion, Stage1HandDiffusionMLP
 from utils.diffusion import DiffusionConfig, DiffusionSchedule
-from utils.general import dump_config, load_config
+from utils.general import dump_config, load_config, load_torch_checkpoint
 from utils.motion_losses import (
     contact_anchor_loss,
     denormalize,
@@ -93,7 +93,7 @@ def _make_model(architecture: str, model_cfg: dict, hand_dim: int, bps_dim: int,
 
 
 def _load_partial(model: torch.nn.Module, ckpt_path: str, device: torch.device) -> None:
-    ckpt = torch.load(ckpt_path, map_location=device)
+    ckpt = load_torch_checkpoint(ckpt_path, map_location=device)
     src = ckpt["model"]
     dst = model.state_dict()
     filtered = {}

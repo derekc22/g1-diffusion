@@ -42,7 +42,7 @@ from models.stage1_diffusion import Stage1HandDiffusion, Stage1HandDiffusionMLP
 from models.stage2_diffusion import Stage2MLPModel, Stage2TransformerModel
 from utils.contact_constraints import ContactConstraintProcessor
 from utils.diffusion import DiffusionConfig, DiffusionSchedule
-from utils.general import load_config
+from utils.general import load_config, load_torch_checkpoint
 from utils.object_conditioning import apply_object_conditioning_variant, normalize_object_conditioning_variant
 from utils.object_goal_features import OBJECT_POSE_DIM, ROBOT_STATE_DIM, object_pose_from_data, robot_object_layout
 from utils.rotation import rot6d_to_quat_xyzw
@@ -240,8 +240,8 @@ def main() -> None:
     device = torch.device(sample_cfg.get("device", "cuda:0"))
     dtype = torch.float32
 
-    stage1_ckpt = torch.load(_resolve(sample_cfg["stage1_ckpt_path"]), map_location=device, weights_only=False)
-    stage2_ckpt = torch.load(_resolve(sample_cfg["stage2_ckpt_path"]), map_location=device, weights_only=False)
+    stage1_ckpt = load_torch_checkpoint(_resolve(sample_cfg["stage1_ckpt_path"]), map_location=device)
+    stage2_ckpt = load_torch_checkpoint(_resolve(sample_cfg["stage2_ckpt_path"]), map_location=device)
     if stage1_ckpt.get("pipeline_type") != "object_goal_two_stage" or stage1_ckpt.get("stage") != 1:
         raise ValueError("stage1_ckpt_path must point to an object-goal two-stage Stage 1 checkpoint")
     if stage2_ckpt.get("pipeline_type") != "object_goal_two_stage" or stage2_ckpt.get("stage") != 2:
