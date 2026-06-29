@@ -52,6 +52,17 @@ def _resolve(path: str) -> str:
     return path if os.path.isabs(path) else os.path.join(PROJECT_ROOT, path)
 
 
+def _require_checkpoint_path(sample_cfg: dict[str, Any], key: str, config_path: str) -> str:
+    path = str(sample_cfg.get(key) or "").strip()
+    if not path:
+        raise ValueError(
+            f"Missing {key}. Edit {config_path} and set:\n"
+            "  sample.stage1_ckpt_path\n"
+            "  sample.stage2_ckpt_path"
+        )
+    return _resolve(path)
+
+
 def _normalize(x: torch.Tensor, mean: torch.Tensor | None, std: torch.Tensor | None) -> torch.Tensor:
     if mean is None or std is None:
         return x
@@ -234,14 +245,22 @@ def main() -> None:
         "--config_path",
         default=os.path.join(PROJECT_ROOT, "experiments", "object_goal", "sample_object_goal_two_stage.yaml"),
     )
+    parser.add_argument("--stage1_ckpt_path", default=None)
+    parser.add_argument("--stage2_ckpt_path", default=None)
     args = parser.parse_args()
     cfg = load_config(args.config_path)
     sample_cfg = cfg["sample"]
+    if args.stage1_ckpt_path is not None:
+        sample_cfg["stage1_ckpt_path"] = args.stage1_ckpt_path
+    if args.stage2_ckpt_path is not None:
+        sample_cfg["stage2_ckpt_path"] = args.stage2_ckpt_path
     device = torch.device(sample_cfg.get("device", "cuda:0"))
     dtype = torch.float32
 
-    stage1_ckpt = load_torch_checkpoint(_resolve(sample_cfg["stage1_ckpt_path"]), map_location=device)
-    stage2_ckpt = load_torch_checkpoint(_resolve(sample_cfg["stage2_ckpt_path"]), map_location=device)
+    stage1_ckpt_path = _require_checkpoint_path(sample_cfg, "stage1_ckpt_path", args.config_path)
+    stage2_ckpt_path = _require_checkpoint_path(sample_cfg, "stage2_ckpt_path", args.config_path)
+    stage1_ckpt = load_torch_checkpoint(stage1_ckpt_path, map_location=device)
+    stage2_ckpt = load_torch_checkpoint(stage2_ckpt_path, map_location=device)
     if stage1_ckpt.get("pipeline_type") != "object_goal_two_stage" or stage1_ckpt.get("stage") != 1:
         raise ValueError("stage1_ckpt_path must point to an object-goal two-stage Stage 1 checkpoint")
     if stage2_ckpt.get("pipeline_type") != "object_goal_two_stage" or stage2_ckpt.get("stage") != 2:

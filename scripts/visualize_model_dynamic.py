@@ -261,6 +261,33 @@ def as_wxyz_quat(rot: Any, key: str) -> np.ndarray:
     raise ValueError(f"{key} must be quaternion (T, 4) or matrix (T, 3, 3), got {rot_arr.shape}")
 
 
+def object_pose_rot6d_to_wxyz_quat(object_pose: Any, key: str) -> np.ndarray:
+    pose = np.asarray(object_pose, dtype=np.float64)
+    if pose.ndim != 2 or pose.shape[1] < 9:
+        raise ValueError(f"{key} must contain object_pos + rot6d with shape (T, 9), got {pose.shape}")
+    r6 = pose[:, 3:9]
+    a1 = r6[:, 0:3]
+    a2 = r6[:, 3:6]
+    b1 = a1 / np.linalg.norm(a1, axis=-1, keepdims=True).clip(min=1e-8)
+    dot = np.sum(b1 * a2, axis=-1, keepdims=True)
+    a2_ortho = a2 - dot * b1
+    b2 = a2_ortho / np.linalg.norm(a2_ortho, axis=-1, keepdims=True).clip(min=1e-8)
+    b3 = np.cross(b1, b2)
+    rot_mat = np.stack([b1, b2, b3], axis=-1)
+    quat_xyzw = R.from_matrix(rot_mat).as_quat()
+    return quat_xyzw[:, [3, 0, 1, 2]]
+
+
+def hand_positions_for_visualization(motion_data: Dict[str, Any]) -> Optional[np.ndarray]:
+    if "hand_positions" in motion_data:
+        return motion_data["hand_positions"]
+    if "hands_rectified" in motion_data:
+        return motion_data["hands_rectified"]
+    if "hands_raw" in motion_data:
+        return motion_data["hands_raw"]
+    return None
+
+
 def load_motion_file(motion_path: str) -> Tuple[
     Dict[str, Any],
     float,
@@ -285,15 +312,19 @@ def load_motion_file(motion_path: str) -> Tuple[
         motion_object_pos = np.asarray(motion_data["object_pos"])
     elif "object_centroid" in motion_data:
         motion_object_pos = np.asarray(motion_data["object_centroid"])
+    elif "object_pose" in motion_data:
+        motion_object_pos = np.asarray(motion_data["object_pose"])[:, :3]
     else:
-        raise KeyError(f"{motion_path} missing object_pos/object_centroid")
+        raise KeyError(f"{motion_path} missing object_pos/object_centroid/object_pose")
 
     if "object_rot" in motion_data:
         motion_object_rot = as_wxyz_quat(motion_data["object_rot"], "object_rot")
     elif "object_rotation" in motion_data:
         motion_object_rot = as_wxyz_quat(motion_data["object_rotation"], "object_rotation")
+    elif "object_pose" in motion_data:
+        motion_object_rot = object_pose_rot6d_to_wxyz_quat(motion_data["object_pose"], "object_pose")
     else:
-        raise KeyError(f"{motion_path} missing object_rot/object_rotation")
+        raise KeyError(f"{motion_path} missing object_rot/object_rotation/object_pose")
 
     return (
         motion_data,
@@ -305,7 +336,7 @@ def load_motion_file(motion_path: str) -> Tuple[
         motion_object_rot,
         motion_data.get("local_body_pos"),
         motion_data.get("link_body_list"),
-        motion_data.get("hand_positions"),
+        hand_positions_for_visualization(motion_data),
     )
 
 
