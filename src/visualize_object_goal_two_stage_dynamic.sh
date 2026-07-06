@@ -5,10 +5,7 @@ set -e
 source /home/learning/miniconda3/etc/profile.d/conda.sh
 
 # Edit these paths directly before running.
-CONFIG_PATH="./experiments/object_goal/sample_object_goal_two_stage.yaml"
-
-# Leave empty to read sample.output_dir from CONFIG_PATH.
-ROBOT_MOTION_FOLDER_ALL=""
+ROBOT_MOTION_FOLDER_ALL="/home/learning/Documents/g1-diffusion/logs/object_goal_stage2_hf_bps_e10000_b16_lr5e-06_ts1000_w300_s10_transformer_2026Jun28_23-05-59/samples"
 SAVE_DIR="/home/learning/Documents/g1-diffusion/videos/object_goal_two_stage"
 OBJECTS_DIR="/home/learning/Documents/omomo_release/data/captured_objects"
 GMR_ROOT="/home/learning/Documents/g1-gmr"
@@ -17,26 +14,9 @@ REFERENCE_MOTION_FOLDER="/media/learning/DATA/export_smplx_retargeted"
 conda activate g1-gmr
 cd /home/learning/Documents/g1-diffusion
 
-if [ -z "$ROBOT_MOTION_FOLDER_ALL" ]; then
-    ROBOT_MOTION_FOLDER_ALL=$(python3 - "$CONFIG_PATH" <<'PY'
-import os
-import sys
-
-path = "./out/object_goal_two_stage"
-with open(sys.argv[1], "r") as f:
-    for line in f:
-        stripped = line.strip()
-        if stripped.startswith("output_dir:"):
-            path = stripped.split(":", 1)[1].strip().strip("\"'")
-            break
-print(path if os.path.isabs(path) else os.path.abspath(path))
-PY
-)
-fi
-
 if [ ! -d "$ROBOT_MOTION_FOLDER_ALL" ]; then
     echo "Sample folder does not exist: $ROBOT_MOTION_FOLDER_ALL" >&2
-    echo "Run src/sample_object_goal_stage2_hf_bps.sh first, or edit ROBOT_MOTION_FOLDER_ALL inside this script." >&2
+    echo "Run src/sample_object_goal_stage2_hf_bps_optimized.sh first, or edit ROBOT_MOTION_FOLDER_ALL inside this script." >&2
     exit 1
 fi
 
