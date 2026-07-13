@@ -22,6 +22,14 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
+try:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+except ImportError:
+    plt = None
+
 from datasets.hand_motion_dataset import HandMotionDataset
 from models.stage2_diffusion import Stage2MLPModel, Stage2TransformerModel
 from utils.diffusion import DiffusionConfig, DiffusionSchedule
@@ -124,7 +132,9 @@ def main() -> None:
         f"w{window_size}_s{stride}_{architecture}_{timestamp}"
     )
     log_path = os.path.join(save_dir, exp_name)
+    figure_path = os.path.join(log_path, "figures")
     ckpt_path = os.path.join(log_path, "checkpoints")
+    os.makedirs(figure_path, exist_ok=True)
     os.makedirs(ckpt_path, exist_ok=True)
     dump_config(os.path.join(log_path, "config.yml"), yml)
 
@@ -190,6 +200,7 @@ def main() -> None:
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     global_step = 0
     best_loss = float("inf")
+    losses = []
     train_start = time.monotonic()
     ckpt_file = None
     stop_requested = False
@@ -232,6 +243,7 @@ def main() -> None:
         if num_batches == 0:
             raise RuntimeError("Training dataloader produced no batches")
         avg_loss = epoch_loss / num_batches
+        losses.append(avg_loss)
         best_loss = min(best_loss, avg_loss)
         print(f"Epoch {epoch}: avg_hand_mse={avg_loss:.6f} (best={best_loss:.6f})")
 
@@ -277,6 +289,23 @@ def main() -> None:
                 ckpt_file,
             )
             print(f"Saved checkpoint: {ckpt_file}")
+
+        plot_every = int(train_cfg.get("plot_every", save_every))
+        if plt is not None and (epoch % plot_every == 0 or epoch == num_epochs - 1 or stop_requested):
+            plt.figure(figsize=(10, 6))
+            plt.plot(np.arange(len(losses)), losses, label="hand MSE")
+            plt.xlabel("Epoch")
+            plt.ylabel("Loss")
+            plt.title("Goal-only object-goal Stage 1 loss")
+            plt.grid(True, alpha=0.3)
+            plt.legend()
+            figure_file = os.path.join(figure_path, f"loss_epoch_{epoch:06d}.png")
+            plt.savefig(figure_file, dpi=100, bbox_inches="tight")
+            plt.close()
+            print(f"Saved loss plot: {figure_file}")
+        elif plt is None and epoch == 0:
+            print("Warning: matplotlib is unavailable; loss plots will not be generated")
+
         if stop_requested:
             print("Stopping due to configured smoke-run limit")
             break
