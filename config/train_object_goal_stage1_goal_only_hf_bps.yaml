@@ -1,0 +1,45 @@
+# Stage 1: p(hands | final object goal). No per-frame semantic condition.
+
+root_dir: "./data/hf_bps_preprocessed"
+
+train:
+  batch_size: 64
+  num_epochs: 10000
+  lr: 1e-4
+  timesteps: 1000
+  beta_start: 1e-4
+  beta_end: 0.02
+  prediction_type: "x0"
+  device: "cuda:0"
+  architecture: "transformer"
+  save_dir: "./logs"
+  save_every: 100
+  exp_prefix: "object_goal_stage1_goal_only_hf_bps"
+  num_workers: 4
+  log_every: 50
+  max_grad_norm: 1.0
+  seed: 42
+
+dataset:
+  window_size: 300
+  stride: 10
+  min_seq_len: 30
+  train_split: 0.99
+  preload: true
+  balance_by_object: false
+
+model:
+  state_dim: 6
+  hand_dim: 6
+  cond_dim: 0
+  global_cond_dim: 9
+  contact_dim: 0
+  max_len: 300
+  global_cond_hidden: 256
+  mlp_hidden: 512
+  mlp_layers: 4
+  d_model: 256
+  nhead: 4
+  num_layers: 4
+  dim_feedforward: 512
+  dropout: 0.1

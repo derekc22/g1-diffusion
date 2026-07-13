@@ -1,0 +1,47 @@
+# Tiny CPU smoke config. Do not use for full training.
+
+root_dir: "./data/hf_bps_preprocessed"
+
+train:
+  batch_size: 1
+  num_epochs: 1
+  lr: 1e-4
+  timesteps: 8
+  beta_start: 1e-4
+  beta_end: 0.02
+  prediction_type: "x0"
+  device: "cpu"
+  architecture: "transformer"
+  save_dir: "./logs"
+  save_every: 1
+  exp_prefix: "object_goal_stage1_goal_only_hf_bps_smoke"
+  num_workers: 0
+  log_every: 1
+  max_grad_norm: 1.0
+  max_train_steps: 2
+  max_train_seconds: 20
+  seed: 42
+
+dataset:
+  window_size: 30
+  stride: 300
+  min_seq_len: 30
+  train_split: 0.99
+  preload: true
+  balance_by_object: false
+
+model:
+  state_dim: 6
+  hand_dim: 6
+  cond_dim: 0
+  global_cond_dim: 9
+  contact_dim: 0
+  max_len: 30
+  global_cond_hidden: 32
+  mlp_hidden: 64
+  mlp_layers: 2
+  d_model: 32
+  nhead: 4
+  num_layers: 1
+  dim_feedforward: 64
+  dropout: 0.0
