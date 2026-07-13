@@ -24,6 +24,14 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
+try:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+except ImportError:
+    plt = None
+
 from datasets.hf_motion_dataset import HFFullBodyDataset
 from models.stage2_diffusion import Stage2MLPModel, Stage2TransformerModel
 from utils.diffusion import DiffusionConfig, DiffusionSchedule
@@ -134,7 +142,9 @@ def main() -> None:
         f"w{window_size}_s{stride}_{architecture}_{timestamp}"
     )
     log_path = os.path.join(save_dir, exp_name)
+    figure_path = os.path.join(log_path, "figures")
     ckpt_path = os.path.join(log_path, "checkpoints")
+    os.makedirs(figure_path, exist_ok=True)
     os.makedirs(ckpt_path, exist_ok=True)
     dump_config(os.path.join(log_path, "config.yml"), yml)
 
@@ -205,6 +215,7 @@ def main() -> None:
     schedule = DiffusionSchedule(schedule_cfg).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
+    losses = []
     best_loss = float("inf")
     global_step = 0
     train_start = time.monotonic()
@@ -270,10 +281,12 @@ def main() -> None:
                 break
 
         avg_loss = epoch_loss / max(num_batches, 1)
+        losses.append(avg_loss)
         best_loss = min(best_loss, avg_loss)
         print(f"Epoch {epoch}: avg_loss={avg_loss:.6f} (best={best_loss:.6f})")
 
-        if (epoch + 1) % save_every == 0 or epoch == num_epochs - 1 or stop_requested:
+        should_save = (epoch + 1) % save_every == 0 or epoch == num_epochs - 1 or stop_requested
+        if should_save:
             ckpt_file = os.path.join(ckpt_path, f"object_goal_single_stage_epoch_{epoch:06d}.pt")
             torch.save(
                 {
@@ -313,6 +326,17 @@ def main() -> None:
                 ckpt_file,
             )
             print(f"Saved checkpoint: {ckpt_file}")
+
+
+        if plt is not None and (epoch % save_every == 0 or epoch == num_epochs - 1):
+            plt.figure(figsize=(10, 6))
+            plt.plot(np.arange(len(losses)), losses)
+            plt.xlabel("Epoch")
+            plt.ylabel("Loss")
+            plt.title("Single-stage goal-only robot-object diffusion loss")
+            plt.grid(True, alpha=0.3)
+            plt.savefig(os.path.join(figure_path, f"loss_epoch_{epoch}.png"), dpi=100)
+            plt.close()
 
         if stop_requested:
             print("Stopping due to configured smoke-run limit")
