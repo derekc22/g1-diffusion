@@ -1,0 +1,20 @@
+root_dir: "./data/hf_bps_preprocessed"
+
+sample:
+  # Replace with a checkpoint produced by train_object_goal_single_stage_hf_bps.py.
+  ckpt_path: ""
+  root_dir: "./data/hf_bps_preprocessed"
+  input_path: null
+  output_dir: null
+  num_samples: 10
+  max_len: 300
+  device: "cuda:0"
+  seed: 42
+
+optimization:
+  precision: "fp32"
+  sampler: "ddim"
+  num_inference_steps: 50
+  ddim_eta: 0.0
+
+exp_name: "object_goal_single_stage_goal_only"
