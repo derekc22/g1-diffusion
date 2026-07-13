@@ -3,6 +3,9 @@
 The source PKL supplies only a sequence length, its final 9D object goal, and
 optional output metadata. Stage 1 generates hands from the goal; Stage 2
 generates [robot_state, object_pose] from those hands and the same goal.
+
+With --use_gt_hands, Stage 1 is not loaded and Stage 2 is conditioned on the
+source PKL's ground-truth hand_positions trajectory for debugging only.
 """
 
 from __future__ import annotations
@@ -97,6 +100,23 @@ def _source_goal_and_length(data: dict[str, Any], max_len: int) -> tuple[np.ndar
         raise ValueError("Source item has no usable frames")
     # The goal is the source motion's final pose, not a clean trajectory prefix.
     return object_pose[-1].astype(np.float32), seq_len
+
+
+def _ground_truth_hands(data: dict[str, Any], seq_len: int) -> np.ndarray:
+    if "hand_positions" not in data or data["hand_positions"] is None:
+        raise KeyError("GT-hands diagnostic requires source key 'hand_positions'")
+    hands = np.asarray(data["hand_positions"], dtype=np.float32)
+    if hands.ndim != 2 or hands.shape[1] != HAND_DIM:
+        raise ValueError(
+            f"Source hand_positions must have shape (T, {HAND_DIM}), got {hands.shape}"
+        )
+    if hands.shape[0] < seq_len:
+        raise ValueError(
+            f"Source hand_positions has {hands.shape[0]} frames, but sampling requires {seq_len}"
+        )
+    if not np.isfinite(hands[:seq_len]).all():
+        raise ValueError("Source hand_positions contains non-finite values")
+    return hands[:seq_len].copy()
 
 
 def _inference_config(yml: dict[str, Any]) -> InferenceConfig:
@@ -387,10 +407,177 @@ class GoalOnlyTwoStagePipeline:
         }
 
 
-def _output_dir(stage2_ckpt_path: str, yml: dict[str, Any], inference: InferenceConfig) -> str:
+class GoalOnlyStage2GTHandsPipeline:
+    """Stage-2-only diagnostic conditioned on source ground-truth hands."""
+
+    def __init__(
+        self,
+        stage2_ckpt_path: str,
+        inference: InferenceConfig,
+        device: torch.device,
+    ) -> None:
+        self.device = device
+        self.inference = inference
+        if inference.precision == PrecisionMode.FP16 and device.type == "cuda":
+            self.dtype = torch.float16
+        elif inference.precision == PrecisionMode.BF16:
+            self.dtype = torch.bfloat16
+        else:
+            self.dtype = torch.float32
+
+        # This branch deliberately loads no Stage 1 checkpoint.
+        ckpt = load_torch_checkpoint(stage2_ckpt_path, map_location=device)
+        _validate_common(ckpt, "Stage 2", STAGE2_MODEL_TYPE, HAND_DIM)
+        if int(ckpt.get("state_dim", -1)) != ROBOT_OBJECT_STATE_DIM:
+            raise ValueError(
+                f"Stage 2 checkpoint state_dim must be {ROBOT_OBJECT_STATE_DIM}"
+            )
+
+        window_size = int(ckpt["config"].get("dataset", {}).get("window_size", 300))
+        model = _model_from_checkpoint(
+            ckpt, ROBOT_OBJECT_STATE_DIM, HAND_DIM, window_size
+        )
+        model.load_state_dict(ckpt["model"], strict=True)
+        self.model = model.to(device=device, dtype=self.dtype).eval()
+        self.adapter = _Stage2Adapter(self.model)
+
+        norm_stats = ckpt.get("norm_stats", {})
+        self.state_mean = _required_stat(
+            norm_stats, "state_mean", ROBOT_OBJECT_STATE_DIM, device, "Stage 2"
+        )
+        self.state_std = _required_stat(
+            norm_stats, "state_std", ROBOT_OBJECT_STATE_DIM, device, "Stage 2"
+        )
+        self.hand_mean = _required_stat(
+            norm_stats, "hand_mean", HAND_DIM, device, "Stage 2"
+        )
+        self.hand_std = _required_stat(
+            norm_stats, "hand_std", HAND_DIM, device, "Stage 2"
+        )
+        self.goal_mean = _required_stat(
+            norm_stats, "goal_mean", OBJECT_POSE_DIM, device, "Stage 2"
+        )
+        self.goal_std = _required_stat(
+            norm_stats, "goal_std", OBJECT_POSE_DIM, device, "Stage 2"
+        )
+        dataset_cfg = ckpt["config"].get("dataset", {})
+        self.normalize_hands = bool(
+            norm_stats.get("normalize_hands", dataset_cfg.get("normalize_hands", False))
+        )
+
+        self.schedule_cfg = _schedule_config(ckpt)
+        if inference.sampler == SamplerType.DDPM:
+            self.sampler = None
+            self.schedule = DiffusionSchedule(
+                DiffusionConfig(**self.schedule_cfg)
+            ).to(device)
+        else:
+            self.sampler = create_sampler(
+                inference.sampler,
+                num_train_timesteps=self.schedule_cfg["timesteps"],
+                num_inference_steps=inference.num_inference_steps,
+                beta_start=self.schedule_cfg["beta_start"],
+                beta_end=self.schedule_cfg["beta_end"],
+                ddim_eta=inference.ddim_eta,
+            ).to(device)
+            self.schedule = None
+
+    @torch.inference_mode()
+    def _sample_ddpm(self, hands: torch.Tensor, goal: torch.Tensor) -> torch.Tensor:
+        assert self.schedule is not None
+        batch_size, seq_len, _ = hands.shape
+        x = torch.randn(
+            batch_size,
+            seq_len,
+            ROBOT_OBJECT_STATE_DIM,
+            device=self.device,
+            dtype=self.dtype,
+        )
+        for n in reversed(range(self.schedule.timesteps)):
+            t = torch.full((batch_size,), n, device=self.device, dtype=torch.long)
+            x0_pred = self.model(x, t, cond=hands, global_cond=goal)
+            if n == 0:
+                x = x0_pred
+                continue
+            alpha_bar_t = self.schedule.alpha_bar[n]
+            alpha_bar_prev = self.schedule.alpha_bar[n - 1]
+            alpha_t = self.schedule.alpha[n]
+            mean = (
+                torch.sqrt(alpha_bar_prev)
+                * (1 - alpha_t)
+                / (1 - alpha_bar_t)
+                * x0_pred
+                + torch.sqrt(alpha_t)
+                * (1 - alpha_bar_prev)
+                / (1 - alpha_bar_t)
+                * x
+            )
+            x = mean + torch.sqrt(self.schedule.beta[n]) * torch.randn_like(x)
+        return x
+
+    @torch.inference_mode()
+    def generate(self, data: dict[str, Any], max_len: int) -> dict[str, Any]:
+        goal_np, seq_len = _source_goal_and_length(data, max_len)
+        hands_np = _ground_truth_hands(data, seq_len)
+        hands_raw = torch.from_numpy(hands_np).to(
+            device=self.device, dtype=self.dtype
+        ).unsqueeze(0)
+        hands_cond = (
+            _normalize(hands_raw, self.hand_mean, self.hand_std)
+            if self.normalize_hands
+            else hands_raw
+        )
+        goal_raw = torch.from_numpy(goal_np).to(
+            device=self.device, dtype=self.dtype
+        ).unsqueeze(0)
+        goal = _normalize(goal_raw, self.goal_mean, self.goal_std)
+
+        if self.sampler is None:
+            state_norm = self._sample_ddpm(hands_cond, goal)
+        else:
+            state_norm = self.sampler.sample(
+                model=self.adapter,
+                shape=(1, seq_len, ROBOT_OBJECT_STATE_DIM),
+                condition_fn=lambda: (hands_cond, goal),
+                device=self.device,
+                dtype=self.dtype,
+            )
+
+        state = _denormalize(state_norm, self.state_mean, self.state_std)
+        state_np = state.squeeze(0).float().cpu().numpy()
+        robot_state = state_np[:, :ROBOT_STATE_DIM]
+        object_pose = state_np[:, ROBOT_STATE_DIM:]
+        return {
+            "pipeline_type": PIPELINE_TYPE,
+            "prediction_type": PREDICTION_TYPE,
+            "diagnostic_mode": "gt_hands_stage2_only",
+            "hands_source": "ground_truth",
+            "hands_normalized_for_conditioning": self.normalize_hands,
+            "layout": robot_object_layout(),
+            "state": state_np,
+            "robot_state": robot_state,
+            "object_pose": object_pose,
+            "root_pos": robot_state[:, :3],
+            "root_rot": rot6d_to_quat_xyzw(
+                torch.from_numpy(robot_state[:, 3:9]).float()
+            ).numpy(),
+            "dof_pos": robot_state[:, 9:],
+            "goal": goal_np,
+            "hands": hands_np,
+            "hands_gt": hands_np,
+        }
+
+
+def _output_dir(
+    stage2_ckpt_path: str,
+    yml: dict[str, Any],
+    inference: InferenceConfig,
+    diagnostic_gt_hands: bool = False,
+) -> str:
+    diagnostic_suffix = "_gt_hands_stage2_only" if diagnostic_gt_hands else ""
     configured = yml.get("sample", {}).get("output_dir")
     if configured:
-        return _resolve(configured)
+        return _resolve(configured) + diagnostic_suffix
     timestamp = datetime.now().strftime("%Y%b%d_%H-%M-%S")
     exp_name = str(yml.get("exp_name", "goal_only"))
     parts = stage2_ckpt_path.split(os.sep)
@@ -402,9 +589,13 @@ def _output_dir(stage2_ckpt_path: str, yml: dict[str, Any], inference: Inference
             "logs",
             log_id,
             "samples",
-            f"{inference.sampler.value}_{timestamp}_{exp_name}",
+            f"{inference.sampler.value}_{timestamp}_{exp_name}{diagnostic_suffix}",
         )
-    return os.path.join(PROJECT_ROOT, "out", f"{PIPELINE_TYPE}_{timestamp}_{exp_name}")
+    return os.path.join(
+        PROJECT_ROOT,
+        "out",
+        f"{PIPELINE_TYPE}_{timestamp}_{exp_name}{diagnostic_suffix}",
+    )
 
 
 def main() -> None:
@@ -418,17 +609,24 @@ def main() -> None:
             "sample_object_goal_stage2_goal_only_hf_bps.yaml",
         ),
     )
+    parser.add_argument(
+        "--use_gt_hands",
+        action="store_true",
+        help="Bypass Stage 1 and condition Stage 2 on source hand_positions",
+    )
     args = parser.parse_args()
 
     yml = load_config(args.config_path)
     sample_cfg = yml["sample"]
     inference = _inference_config(yml.get("optimization", {}))
-    stage1_ckpt_path = _required_checkpoint(
-        sample_cfg, "stage1_ckpt_path", args.config_path
-    )
     stage2_ckpt_path = _required_checkpoint(
         sample_cfg, "stage2_ckpt_path", args.config_path
     )
+    stage1_ckpt_path = None
+    if not args.use_gt_hands:
+        stage1_ckpt_path = _required_checkpoint(
+            sample_cfg, "stage1_ckpt_path", args.config_path
+        )
     root_dir = _resolve(
         sample_cfg.get("root_dir", yml.get("root_dir", "./data/hf_bps_preprocessed"))
     )
@@ -455,18 +653,32 @@ def main() -> None:
     if not input_paths:
         raise RuntimeError(f"No source PKLs found in {root_dir}")
 
-    pipeline = GoalOnlyTwoStagePipeline(
-        stage1_ckpt_path, stage2_ckpt_path, inference, device
+    if args.use_gt_hands:
+        pipeline = GoalOnlyStage2GTHandsPipeline(stage2_ckpt_path, inference, device)
+    else:
+        assert stage1_ckpt_path is not None
+        pipeline = GoalOnlyTwoStagePipeline(
+            stage1_ckpt_path, stage2_ckpt_path, inference, device
+        )
+    output_dir = _output_dir(
+        stage2_ckpt_path,
+        yml,
+        inference,
+        diagnostic_gt_hands=args.use_gt_hands,
     )
-    output_dir = _output_dir(stage2_ckpt_path, yml, inference)
     os.makedirs(output_dir, exist_ok=True)
     max_len = int(sample_cfg.get("max_len", 300))
 
-    print("Goal-only object-goal two-stage sampling")
-    print(f"Stage 1 checkpoint: {stage1_ckpt_path}")
+    if args.use_gt_hands:
+        print("Goal-only Stage 2 GT-hands diagnostic sampling")
+        print("Stage 1 checkpoint: not loaded")
+        print("Stage 2 condition: ground-truth 6D hands + final 9D object goal")
+    else:
+        print("Goal-only object-goal two-stage sampling")
+        print(f"Stage 1 checkpoint: {stage1_ckpt_path}")
+        print("Stage 1 condition: final 9D object goal only")
+        print("Stage 2 condition: generated 6D hands + final 9D object goal")
     print(f"Stage 2 checkpoint: {stage2_ckpt_path}")
-    print("Stage 1 condition: final 9D object goal only")
-    print("Stage 2 condition: generated 6D hands + final 9D object goal")
     print("Contact rectification: disabled")
     print(f"Processing {len(input_paths)} source item(s)")
     print(f"Output: {output_dir}")
