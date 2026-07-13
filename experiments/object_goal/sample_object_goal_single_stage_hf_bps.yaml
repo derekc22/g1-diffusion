@@ -2,7 +2,7 @@ root_dir: "./data/hf_bps_preprocessed"
 
 sample:
   # Replace with a checkpoint produced by train_object_goal_single_stage_hf_bps.py.
-  ckpt_path: ""
+  ckpt_path: "/home/learning/Documents/g1-diffusion/logs/object_goal_single_stage_hf_bps_e10000_b16_lr5e-06_ts1000_w300_s10_transformer_2026Jul12_21-26-31/checkpoints/object_goal_single_stage_epoch_000199.pt"
   root_dir: "./data/hf_bps_preprocessed"
   input_path: null
   output_dir: null

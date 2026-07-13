@@ -4,8 +4,8 @@ set -e
 # Dynamic-object video visualization for object-goal two-stage samples.
 source /home/learning/miniconda3/etc/profile.d/conda.sh
 
-# Edit these paths directly before running.
-ROBOT_MOTION_FOLDER_ALL="/home/learning/Documents/g1-diffusion/logs/object_goal_stage2_hf_bps_e10000_b16_lr5e-06_ts1000_w300_s10_transformer_2026Jun28_23-05-59/samples"
+# Edit these paths directly before running.cle
+ROBOT_MOTION_FOLDER_ALL="/home/learning/Documents/g1-diffusion/logs/object_goal_single_stage_hf_bps_e10000_b16_lr5e-06_ts1000_w300_s10_transformer_2026Jul12_21-26-31/samples/ddim_2026Jul12_23-47-40_object_goal_single_stage_goal_only"
 SAVE_DIR="/home/learning/Documents/g1-diffusion/videos/object_goal_two_stage"
 OBJECTS_DIR="/home/learning/Documents/omomo_release/data/captured_objects"
 GMR_ROOT="/home/learning/Documents/g1-gmr"
