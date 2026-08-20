@@ -1,0 +1,40 @@
+root_dir: "./data/hf_bps_preprocessed"
+
+eval:
+  # Required: checkpoint produced by the init+goal trainer.
+  ckpt_path: "./logs/object_goal_single_stage_init_goal_hf_bps_e10000_b16_lr5e-06_ts1000_w300_s10_transformer_2026Aug05_21-21-42/checkpoints/object_goal_single_stage_init_goal_epoch_000999.pt"
+  input_source_dir: "./data/hf_bps_preprocessed"
+  output_dir: null
+  modes: ["A", "B", "C"]
+  num_samples: 1000
+  qualitative_num_samples: 10
+  max_len: 300
+  min_len: 30
+  device: "cuda:0"
+  seed: 42
+  same_object_only: true
+  parent_unclear_margin: 0.05
+
+  # Mode C is disabled unless at least one explicit goal is listed or
+  # perturbation.enabled is true. Each explicit goal is xyz + rotation-6D.
+  arbitrary_goals: []
+  perturbation:
+    enabled: false
+    position_delta: [0.0, 0.0, 0.1]
+    rotation_6d_delta: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+  success:
+    final_object_position_threshold: 0.10
+    final_object_rotation_threshold_deg: 20.0
+
+optimization:
+  precision: "fp32"
+  sampler: "ddim"                 # ddim or ddpm
+  num_inference_steps: 50
+  ddim_eta: 0.0
+
+visualization:
+  script: "./scripts/visualize_model_dynamic.py"
+  gmr_root: "/home/learning/Documents/g1-gmr"
+  objects_dir: "/home/learning/Documents/omomo_release/data/captured_objects"
+  reference_motion_folder: null

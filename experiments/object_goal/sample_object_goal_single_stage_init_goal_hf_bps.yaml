@@ -1,0 +1,28 @@
+root_dir: "./data/hf_bps_preprocessed"
+
+sample:
+  # Required: checkpoint produced by the init+goal trainer.
+  ckpt_path: "./logs/object_goal_single_stage_init_goal_hf_bps_e10000_b16_lr5e-06_ts1000_w300_s10_transformer_2026Aug05_21-21-42/checkpoints/object_goal_single_stage_init_goal_epoch_000999.pt"
+  root_dir: "./data/hf_bps_preprocessed"
+  input_path: null
+  output_dir: null
+  mode: "A"
+  eval_mode: null
+  num_samples: 10
+  max_len: 300
+  device: "cuda:0"
+  seed: 42
+
+  # Optional physical-space overrides. Omitted/null fields come from the source PKL.
+  global_cond_override:
+    final_object_frame: null       # 9 floats: xyz + rotation-6D
+    initial_robot_frame: null      # 38 floats
+    initial_object_frame: null     # 9 floats
+
+optimization:
+  precision: "fp32"
+  sampler: "ddim"                 # ddim or ddpm
+  num_inference_steps: 50
+  ddim_eta: 0.0
+
+exp_name: "object_goal_single_stage_init_goal"

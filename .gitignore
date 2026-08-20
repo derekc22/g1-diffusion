@@ -13,3 +13,5 @@ videos/
 **__pycache__
 history/
 retargeted_samples/
+evals/
+out/
