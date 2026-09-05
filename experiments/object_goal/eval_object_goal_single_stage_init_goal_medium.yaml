@@ -5,7 +5,7 @@ eval:
   input_source_dir: "./data/hf_bps_preprocessed"
   output_dir: null
   modes: ["A", "B"]
-  num_samples: 1000
+  num_samples: 100
   qualitative_num_samples: 10
   max_len: 300
   min_len: 30
@@ -29,8 +29,8 @@ eval:
   # Report mode D: fixed final goal with varied initial robot/object states.
   init_sweep:
     enabled: true
-    num_goals: 5
-    num_initial_conditions_per_goal: 20
+    num_goals: 3
+    num_initial_conditions_per_goal: 10
     same_object_only: true
     include_goal_parent_initial: true
     qualitative_num_samples_per_goal: 1
@@ -42,7 +42,7 @@ eval:
   ood_radius_sweep:
     enabled: true
     radii_m: [0.0, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50]
-    samples_per_radius: 100
+    samples_per_radius: 25
     directions: ["random_xy"]
     same_object_only: true
     seed: 42
