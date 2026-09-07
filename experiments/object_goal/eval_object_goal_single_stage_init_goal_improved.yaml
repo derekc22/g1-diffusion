@@ -33,7 +33,7 @@ eval:
     num_initial_conditions_per_goal: 20
     same_object_only: true
     include_goal_parent_initial: true
-    qualitative_num_samples_per_goal: 1
+    qualitative_num_samples_per_goal: 5
     seed: 42
 
   # Report mode C: dataset initial state with an XY-perturbed final object goal.

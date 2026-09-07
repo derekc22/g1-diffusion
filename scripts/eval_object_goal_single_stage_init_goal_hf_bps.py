@@ -796,6 +796,14 @@ def main() -> None:
         )
         summary["ood_radius_sweep"] = radius_summary
         ghost_commands.extend(commands)
+    trajectory_counts = {
+        "A": int((summary.get("modes", {}).get("A") or {}).get("num_samples", 0)),
+        "B": int((summary.get("modes", {}).get("B") or {}).get("num_samples", 0)),
+        "C": int((summary.get("ood_radius_sweep", {}).get("all_samples") or {}).get("num_samples", 0)),
+        "D": int((summary.get("init_sweep", {}).get("all_samples") or {}).get("num_samples", 0)),
+    }
+    trajectory_counts["total"] = sum(trajectory_counts.values())
+    summary["trajectory_counts"] = trajectory_counts
     summary.update(
         checkpoint=resolve_path(ckpt_value), input_source_dir=input_dir, output_dir=output_root,
         sampler=inference.sampler.value, num_inference_steps=inference.num_inference_steps,
@@ -811,6 +819,10 @@ def main() -> None:
     print(f"Ghost visualization commands: {os.path.join(output_root, 'qualitative', 'visualize_ghost_commands.sh')}")
     print(f"XY diagnostic plots: {len(xy_plots)} generated")
     print("Mode labels: A=Single motion, B=Interpolated motion, C=OOD goal-radius sweep, D=Initial-condition sweep")
+    print(
+        "Trajectory counts: "
+        + ", ".join(f"{mode}={trajectory_counts[mode]}" for mode in ("A", "B", "C", "D", "total"))
+    )
 
 
 if __name__ == "__main__":
